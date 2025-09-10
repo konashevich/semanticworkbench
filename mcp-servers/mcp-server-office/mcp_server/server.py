@@ -199,7 +199,8 @@ def create_mcp_server() -> FastMCP:
             Markdown content of the opened document or an error message.
         """
         try:
-            p = Path(path).expanduser()
+            from mcp_server.path_utils import resolve_user_path
+            p = resolve_user_path(path)
             if not p.is_file():
                 return f"ERROR: File not found: {p}"
             if p.suffix.lower() != ".docx":
@@ -346,7 +347,8 @@ def create_mcp_server() -> FastMCP:
             import asyncio
 
             if path:
-                p = Path(path).expanduser()
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
                 if not p.is_file():
                     return f"ERROR: File not found: {p}"
                 hci = _parse_highlight_color(color)
@@ -454,7 +456,8 @@ def create_mcp_server() -> FastMCP:
         try:
             import asyncio
             if path:
-                p = Path(path).expanduser()
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
                 if not p.is_file():
                     return f"ERROR: File not found: {p}"
                 hci = _parse_highlight_color(color)
@@ -665,7 +668,8 @@ def create_mcp_server() -> FastMCP:
                 return (count, None)
 
             if path:
-                p = Path(path).expanduser()
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
                 if not p.is_file():
                     return f"ERROR: File not found: {p}"
 
@@ -821,7 +825,8 @@ def create_mcp_server() -> FastMCP:
             import asyncio
 
             if path:
-                p = Path(path).expanduser()
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
 
                 def _do_on_worker(word):
                     # Close the specific document if open in this instance

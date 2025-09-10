@@ -193,10 +193,16 @@ def canonical_doc_key(path_str: str) -> str:
 
     - Absolute path
     - Normalized separators
-    - Case-normalized on Windows (so C:\ and c:\ map to the same key)
+    - Case-normalized on Windows (so C:\\ and c:\\ map to the same key)
     """
     try:
-        abs_path = os.path.abspath(path_str)
+        # Accept file:// URIs and plain paths
+        if path_str.lower().startswith("file:"):
+            from .path_utils import _from_file_uri
+            fs_path = str(_from_file_uri(path_str))
+        else:
+            fs_path = path_str
+        abs_path = os.path.abspath(fs_path)
         norm = os.path.normpath(abs_path)
         return os.path.normcase(norm)
     except Exception:
