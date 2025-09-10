@@ -2,6 +2,22 @@
 
 
 import sys
+from contextlib import suppress
+
+def _ensure_com_initialized():
+    """Idempotently initialize COM for the current thread.
+
+    Word (and other Office apps) require an STA. Repeated calls are safe.
+    """
+    try:
+        import pythoncom  # type: ignore
+
+        # CoInitialize is equivalent to CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)
+        with suppress(Exception):
+            pythoncom.CoInitialize()
+    except Exception:
+        # If pythoncom isn't available or initialization fails, we let later code raise a clearer error.
+        pass
 
 from mcp_server.types import WordCommentData
 
@@ -11,6 +27,8 @@ def get_word_app():
         raise EnvironmentError("This script only works on Windows.")
 
     import win32com.client as win32
+
+    _ensure_com_initialized()
 
     """Connect to Word if it is running, or start a new instance."""
     try:
