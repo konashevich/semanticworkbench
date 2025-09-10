@@ -3,6 +3,8 @@
 from mcp.server.fastmcp import Context, FastMCP
 import asyncio
 from pathlib import Path
+import os
+import stat
 
 from mcp_server import settings
 from mcp_server.app_interaction.excel_editor import get_active_workbook, get_excel_app, get_workbook_content
@@ -21,8 +23,167 @@ from mcp_server.markdown_edit.comment_analysis import run_comment_analysis
 from mcp_server.markdown_edit.feedback_step import run_feedback_step
 from mcp_server.markdown_edit.markdown_edit import run_markdown_edit
 from mcp_server.types import MarkdownEditRequest
+from mcp_server.concurrency import with_global_lock, with_doc_lock, run_in_word_worker, canonical_doc_key
 
 server_name = "Office MCP Server"
+
+# Word Highlight color map (WdColorIndex). Includes the standard palette + 0 (no highlight)
+HIGHLIGHT_COLOR_MAP = {
+    # clearing
+    "none": 0,
+    "no_color": 0,
+    "clear": 0,
+    "0": 0,
+    # palette
+    "black": 1,
+    "blue": 2,
+    "turquoise": 3,
+    "bright_green": 4,
+    "pink": 5,
+    "red": 6,
+    "yellow": 7,
+    "white": 8,
+    "dark_blue": 9,
+    "teal": 10,
+    "green": 11,
+    "violet": 12,
+    "dark_red": 13,
+    "dark_yellow": 14,
+    "gray50": 15,
+    "grey50": 15,
+    "dark_gray": 15,
+    "dark_grey": 15,
+    "gray25": 16,
+    "grey25": 16,
+    "light_gray": 16,
+    "light_grey": 16,
+    # numeric strings
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 7,
+    "8": 8,
+    "9": 9,
+    "10": 10,
+    "11": 11,
+    "12": 12,
+    "13": 13,
+    "14": 14,
+    "15": 15,
+    "16": 16,
+}
+
+def _parse_highlight_color(color: str | int | None) -> int:
+    if color is None:
+        return 7  # default yellow
+    if isinstance(color, int):
+        return int(color)
+    key = str(color).strip().lower()
+    return HIGHLIGHT_COLOR_MAP.get(key, 7)
+
+
+# Helpers to ensure documents open editable
+def _prepare_file_for_edit(p: Path) -> None:
+    """Best-effort: ensure the file is writable and not marked as Internet zone.
+
+    - Clears NTFS Zone.Identifier ADS to avoid Protected View on Windows.
+    - Clears read-only file attribute.
+    """
+    try:
+        if os.name == "nt":
+            # Remove Mark-of-the-Web alternate data stream if present
+            try:
+                os.remove(str(p) + ":Zone.Identifier")
+            except Exception:
+                pass
+        try:
+            mode = os.stat(p).st_mode
+            if mode & stat.S_IWRITE == 0:
+                os.chmod(p, mode | stat.S_IWRITE)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _make_doc_editable(doc) -> None:
+    """Best-effort: disable read-only recommendations and protection on a Word doc."""
+    try:
+        try:
+            doc.ReadOnlyRecommended = False
+        except Exception:
+            pass
+        try:
+            # Clear "Mark as Final"
+            doc.Final = False
+        except Exception:
+            pass
+        try:
+            prot = getattr(doc, "ProtectionType", -1)
+            if prot not in (-1, 0):
+                try:
+                    doc.Unprotect(Password="")
+                except Exception:
+                    try:
+                        doc.Unprotect("")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _paths_equal(p: Path, doc_fullname: str) -> bool:
+    """Robust path comparison between a filesystem Path and Word's Document.FullName.
+
+    Handles case differences and separator normalization on Windows.
+    """
+    try:
+        return canonical_doc_key(str(p)) == canonical_doc_key(doc_fullname)
+    except Exception:
+        return str(p) == doc_fullname
+
+
+AUTO_CLOSE = os.getenv("MCP_WORD_AUTO_CLOSE", "0").strip().lower() in ("1", "true", "yes")
+DEFAULT_TIMEOUT = int(os.getenv("MCP_WORD_OP_TIMEOUT", "75"))
+
+
+async def _run_on_worker_with_cleanup(p: Path, fn):
+    """Run fn on the worker for path p with timeout and cleanup on CancelledError.
+
+    If the asyncio task is cancelled, best-effort close any open document matching p
+    in the worker instance to avoid leaving lock files or duplicate windows.
+    """
+    key = canonical_doc_key(str(p))
+    try:
+        return await asyncio.wait_for(run_in_word_worker(key, fn), timeout=DEFAULT_TIMEOUT)
+    except asyncio.CancelledError:
+        # Best-effort cleanup: close any open doc matching path on the worker
+        def _cleanup(word):
+            try:
+                for i in range(1, max(1, getattr(word.Documents, "Count", 0)) + 1):
+                    try:
+                        d = word.Documents(i)
+                        if _paths_equal(p, d.FullName):
+                            try:
+                                d.Close(SaveChanges=0)
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return None
+
+        try:
+            await run_in_word_worker(key, _cleanup)
+        except Exception:
+            pass
+        raise
 
 
 def create_mcp_server() -> FastMCP:
@@ -43,29 +204,60 @@ def create_mcp_server() -> FastMCP:
                 return f"ERROR: File not found: {p}"
             if p.suffix.lower() != ".docx":
                 return f"ERROR: Only .docx files supported. Got: {p.suffix}"
-            # Open Word and the document in a background thread (COM is blocking)
             from mcp_server.app_interaction.word_editor import get_word_app, get_markdown_representation
-            def _open():
-                # Ensure COM initialized in this worker thread
-                try:
-                    import pythoncom  # type: ignore
-                    pythoncom.CoInitialize()
-                except Exception:
-                    pass
-                word = get_word_app()
-                # If already open, try to find matching document
-                for i in range(1, word.Documents.Count + 1):
-                    try:
-                        d = word.Documents(i)
-                        if Path(d.FullName) == p:
-                            return d, word
-                    except Exception:
-                        continue
-                doc = word.Documents.Open(str(p))  # type: ignore[attr-defined]
-                return doc, word
 
-            doc, _word = await asyncio.to_thread(_open)
-            return await asyncio.to_thread(get_markdown_representation, doc)
+            async def _task():
+                # Execute on a dedicated Word worker for this path
+                def _open_on_worker(word):
+                    # When using worker pool, we receive the worker's Word instance
+                    if word is None:
+                        from mcp_server.app_interaction.word_editor import get_word_app
+                        word = get_word_app()
+                    _prepare_file_for_edit(p)
+                    # If already open, try to find matching document
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                try:
+                                    # If previously opened read-only, close and reopen writable
+                                    if getattr(d, "ReadOnly", False):
+                                        d.Close(SaveChanges=0)
+                                        d = word.Documents.Open(str(p), ReadOnly=False)
+                                    _make_doc_editable(d)
+                                except Exception:
+                                    pass
+                                return get_markdown_representation(d)
+                        except Exception:
+                            continue
+                    # Open explicitly in editable mode
+                    try:
+                        doc = word.Documents.Open(str(p), ReadOnly=False)
+                    except Exception:
+                        # Fallback to simple open
+                        doc = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        try:
+                            _make_doc_editable(doc)
+                        except Exception:
+                            pass
+                        result = get_markdown_representation(doc)
+                        # Optionally close immediately to release any file locks
+                        if AUTO_CLOSE:
+                            try:
+                                doc.Close(SaveChanges=0)
+                            except Exception:
+                                pass
+                        return result
+                    finally:
+                        # Keep the document open for future operations
+                        pass
+
+                # Prevent indefinite hangs by bounding the open duration and ensure cleanup on cancel
+                return await _run_on_worker_with_cleanup(p, _open_on_worker)
+
+            # Per-document serialization to allow safe parallelism across different files
+            return await with_doc_lock(canonical_doc_key(str(p)), _task)
         except Exception as e:
             return f"ERROR: Failed to open document: {e}"
 
@@ -76,11 +268,15 @@ def create_mcp_server() -> FastMCP:
         Provide only the task instructions (a few sentences). The current document content is fetched automatically.
         """
         try:
-            markdown_edit_output = await run_markdown_edit(
-                markdown_edit_request=MarkdownEditRequest(context=ctx, task=task)
-            )
-            output_string = markdown_edit_output.change_summary + "\n" + markdown_edit_output.output_message
-            return output_string
+            async def _task():
+                markdown_edit_output = await run_markdown_edit(
+                    markdown_edit_request=MarkdownEditRequest(context=ctx, task=task)
+                )
+                output_string = markdown_edit_output.change_summary + "\n" + markdown_edit_output.output_message
+                return output_string
+
+            # Global lock (active document may be unknown/unsaved)
+            return await with_global_lock(_task)
         except Exception as e:
             return f"ERROR: edit_word_document failed: {e}"
 
@@ -90,10 +286,13 @@ def create_mcp_server() -> FastMCP:
         Runs a routine that will add feedback as comments to the currently open Word Document.
         """
         try:
-            comment_output = await run_feedback_step(
-                markdown_edit_request=MarkdownEditRequest(context=ctx),
-            )
-            return comment_output.feedback_summary
+            async def _task():
+                comment_output = await run_feedback_step(
+                    markdown_edit_request=MarkdownEditRequest(context=ctx),
+                )
+                return comment_output.feedback_summary
+
+            return await with_global_lock(_task)
         except Exception as e:
             return f"ERROR: add_comments_to_word_document failed: {e}"
 
@@ -103,10 +302,13 @@ def create_mcp_server() -> FastMCP:
         Runs a routine that analyze the comments in the Word document and determine how they could be solved.
         """
         try:
-            comment_analysis_output = await run_comment_analysis(
-                markdown_edit_request=MarkdownEditRequest(context=ctx),
-            )
-            return comment_analysis_output.edit_instructions + "\n" + comment_analysis_output.assistant_hints
+            async def _task():
+                comment_analysis_output = await run_comment_analysis(
+                    markdown_edit_request=MarkdownEditRequest(context=ctx),
+                )
+                return comment_analysis_output.edit_instructions + "\n" + comment_analysis_output.assistant_hints
+
+            return await with_global_lock(_task)
         except Exception as e:
             return f"ERROR: analyze_comments failed: {e}"
 
@@ -118,19 +320,24 @@ def create_mcp_server() -> FastMCP:
         You should use this after making edits to get the current state of the document.
         """
         try:
-            word = get_word_app()
-            doc = get_active_document(word)
-            markdown_from_word = get_markdown_representation(doc)
-            return markdown_from_word
+            async def _task():
+                word = get_word_app()
+                doc = get_active_document(word)
+                markdown_from_word = get_markdown_representation(doc)
+                return markdown_from_word
+
+            return await with_global_lock(_task)
         except Exception as e:
             return f"ERROR: get_word_content failed: {e}"
 
     @mcp.tool()
-    async def highlight_text(text: str) -> str:
+    async def highlight_text(text: str, color: str | int = "yellow", path: str = "") -> str:
         """Highlight the first occurrence of the given text in the active Word document.
 
         Args:
             text: The exact text (case sensitive) to highlight.
+            color: One of the Word highlight colors (name or index). Use 0/none/clear to remove highlight.
+            path: Optional absolute path to a .docx file to target explicitly.
         Returns:
             Status message about the highlight result.
         """
@@ -138,30 +345,97 @@ def create_mcp_server() -> FastMCP:
             from mcp_server.app_interaction.word_editor import get_word_app, get_active_document
             import asyncio
 
-            def _do_highlight():
-                try:
-                    import pythoncom  # type: ignore
-                    pythoncom.CoInitialize()
-                except Exception:
-                    pass
-                word = get_word_app()
-                doc = get_active_document(word)
-                rng = doc.Content
-                rng.Find.ClearFormatting()
-                found = rng.Find.Execute(FindText=text, MatchCase=True, MatchWholeWord=False)
-                if not found:
-                    return "Text not found"
-                # rng is now the found range
-                rng.HighlightColorIndex = 7  # wdYellow
-                return "Highlighted"
+            if path:
+                p = Path(path).expanduser()
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+                hci = _parse_highlight_color(color)
 
-            result = await asyncio.to_thread(_do_highlight)
-            return result
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    # Find or open the target document
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+                    rng = target.Content
+                    rng.Find.ClearFormatting()
+                    found = rng.Find.Execute(FindText=text, MatchCase=True, MatchWholeWord=False, Wrap=0, Forward=True)
+                    if not found:
+                        if AUTO_CLOSE:
+                            try:
+                                target.Close(SaveChanges=0)
+                            except Exception:
+                                pass
+                        return "Text not found"
+                    rng.HighlightColorIndex = hci
+                    try:
+                        target.Save()
+                    except Exception:
+                        pass
+                    msg = "Highlighted"
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return msg
+
+                async def _task_hl_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                return await with_doc_lock(canonical_doc_key(str(p)), _task_hl_path)
+            else:
+                hci = _parse_highlight_color(color)
+
+                def _do_highlight():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return "ERROR: No document is open. Provide 'path' or open one."
+                    if word.Documents.Count > 1:
+                        return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
+                    except Exception:
+                        pass
+                    rng = doc.Content
+                    rng.Find.ClearFormatting()
+                    found = rng.Find.Execute(FindText=text, MatchCase=True, MatchWholeWord=False, Wrap=0, Forward=True)
+                    if not found:
+                        return "Text not found"
+                    rng.HighlightColorIndex = hci
+                    return "Highlighted"
+
+                async def _task_hl_active():
+                    return await asyncio.to_thread(_do_highlight)
+
+                return await with_global_lock(_task_hl_active)
         except Exception as e:
             return f"ERROR: highlight_text failed: {e}"
 
     @mcp.tool()
-    async def highlight_all(text: str, case_sensitive: bool = False, whole_word: bool = False, max_matches: int = 0) -> str:
+    async def highlight_all(text: str, case_sensitive: bool = False, whole_word: bool = False, max_matches: int = 0, color: str | int = "yellow", path: str = "") -> str:
         """Highlight every occurrence of a string in the active Word document.
 
         Args:
@@ -169,6 +443,8 @@ def create_mcp_server() -> FastMCP:
             case_sensitive: Match case exactly if True.
             whole_word: Match whole words only if True.
             max_matches: 0 = no limit, otherwise stop after this many highlights.
+            color: One of the Word highlight colors (name or index). Use 0/none/clear to remove highlight.
+            path: Optional absolute path to a .docx file to target explicitly.
 
         Returns:
             Summary string with number of highlights applied or an error message.
@@ -177,39 +453,131 @@ def create_mcp_server() -> FastMCP:
             return "ERROR: highlight_all requires non-empty text"
         try:
             import asyncio
-            def _do_all():
-                try:
-                    import pythoncom  # type: ignore
-                    pythoncom.CoInitialize()
-                except Exception:
-                    pass
-                from mcp_server.app_interaction.word_editor import get_word_app, get_active_document
-                word = get_word_app()
-                doc = get_active_document(word)
-                rng = doc.Content
-                rng.Find.ClearFormatting()
-                flags = {
-                    'FindText': text,
-                    'MatchCase': case_sensitive,
-                    'MatchWholeWord': whole_word,
-                }
-                count = 0
-                found = rng.Find.Execute(**flags)
-                while found:
+            if path:
+                p = Path(path).expanduser()
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+                hci = _parse_highlight_color(color)
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    # Find or open the target document
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
                     try:
-                        rng.HighlightColorIndex = 7  # wdYellow
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+                    rng = target.Content
+                    rng.Find.ClearFormatting()
+                    flags = {
+                        'FindText': text,
+                        'MatchCase': case_sensitive,
+                        'MatchWholeWord': whole_word,
+                        'Wrap': 0,
+                        'Forward': True,
+                    }
+                    count = 0
+                    found = rng.Find.Execute(**flags)
+                    while found:
+                        current_end = rng.End
+                        rng.HighlightColorIndex = hci
                         count += 1
                         if max_matches and count >= max_matches:
                             break
-                        # Move search start to end of current match
-                        start_pos = rng.End
+                        start_pos = current_end
+                        if start_pos >= target.Content.End:
+                            break
+                        rng = target.Range(start_pos, target.Content.End)
+                        rng.Find.ClearFormatting()
+                        found = rng.Find.Execute(**flags)
+                        if found and rng.End <= current_end:
+                            break
+                    if count:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return count
+
+                async def _task_hla_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_hla_path)
+            else:
+                hci = _parse_highlight_color(color)
+                def _do_all_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    from mcp_server.app_interaction.word_editor import get_word_app, get_active_document
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return -1
+                    if word.Documents.Count > 1:
+                        return -2
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return -3
+                    except Exception:
+                        pass
+                    rng = doc.Content
+                    rng.Find.ClearFormatting()
+                    flags = {
+                        'FindText': text,
+                        'MatchCase': case_sensitive,
+                        'MatchWholeWord': whole_word,
+                        'Wrap': 0,
+                        'Forward': True,
+                    }
+                    count = 0
+                    found = rng.Find.Execute(**flags)
+                    while found:
+                        current_end = rng.End
+                        rng.HighlightColorIndex = hci
+                        count += 1
+                        if max_matches and count >= max_matches:
+                            break
+                        start_pos = current_end
+                        if start_pos >= doc.Content.End:
+                            break
                         rng = doc.Range(start_pos, doc.Content.End)
                         rng.Find.ClearFormatting()
                         found = rng.Find.Execute(**flags)
-                    except Exception:
-                        break
-                return count
-            applied = await asyncio.to_thread(_do_all)
+                        if found and rng.End <= current_end:
+                            break
+                    return count
+
+                async def _task_hla_active():
+                    return await asyncio.to_thread(_do_all_active)
+
+                applied = await with_global_lock(_task_hla_active)
+                if applied == -1:
+                    return "ERROR: No document is open. Provide 'path' or open one."
+                if applied == -2:
+                    return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                if applied == -3:
+                    return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
             if applied == 0:
                 return "No matches highlighted"
             return f"Highlighted {applied} occurrence(s)"
@@ -224,7 +592,8 @@ def create_mcp_server() -> FastMCP:
         case_sensitive: bool = False,
         whole_word: bool = False,
         preview_only: bool = False,
-    preserve_case: bool = False,
+        preserve_case: bool = False,
+        path: str = "",
     ) -> str:
         """Perform deterministic search & replace in the active Word document.
 
@@ -257,15 +626,7 @@ def create_mcp_server() -> FastMCP:
                     return replacement[:1].upper() + replacement[1:].lower()
                 return replacement
 
-            def _do_replace():
-                try:
-                    import pythoncom  # type: ignore
-                    pythoncom.CoInitialize()
-                except Exception:
-                    pass
-                from mcp_server.app_interaction.word_editor import get_word_app, get_active_document
-                word = get_word_app()
-                doc = get_active_document(word)
+            def _replace_in_doc(doc):
                 try:
                     protection = doc.ProtectionType
                 except Exception:
@@ -278,11 +639,14 @@ def create_mcp_server() -> FastMCP:
                     'FindText': find,
                     'MatchCase': case_sensitive,
                     'MatchWholeWord': whole_word,
+                    'Wrap': 0,  # wdFindStop
+                    'Forward': True,
                 }
                 count = 0
                 found = rng.Find.Execute(**flags)
                 while found:
                     count += 1
+                    current_end = rng.End
                     if not preview_only:
                         new_text = _preserve(rng.Text, replace) if preserve_case else replace
                         rng.Text = new_text
@@ -295,9 +659,74 @@ def create_mcp_server() -> FastMCP:
                         break
                     rng.Find.ClearFormatting()
                     found = rng.Find.Execute(**flags)
+                    # Safety: ensure forward progress
+                    if found and rng.End <= current_end:
+                        break
                 return (count, None)
 
-            count, err = await asyncio.to_thread(_do_replace)
+            if path:
+                p = Path(path).expanduser()
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    # Find or open target document
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+                    count, err = _replace_in_doc(target)
+                    if not preview_only and count:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return count, err
+
+                async def _task_sr_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                count, err = await with_doc_lock(canonical_doc_key(str(p)), _task_sr_path)
+            else:
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    from mcp_server.app_interaction.word_editor import get_word_app, get_active_document
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return 0, "ERROR: No document is open. Provide 'path' or open one."
+                    if word.Documents.Count > 1:
+                        return 0, "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                    doc = get_active_document(word)
+                    return _replace_in_doc(doc)
+
+                async def _task_sr_active():
+                    return await asyncio.to_thread(_do_active)
+
+                count, err = await with_global_lock(_task_sr_active)
             if err:
                 return err
             if count == 0:
@@ -379,5 +808,128 @@ def create_mcp_server() -> FastMCP:
         excel = get_excel_app()
         workbook = get_active_workbook(excel)
         return get_workbook_content(workbook)
+
+    @mcp.tool()
+    async def close_word(path: str = "", save: bool = False) -> str:
+        """Close a specific Word document by path, or all documents if none specified.
+
+        Args:
+            path: Optional absolute path to a .docx. If empty, closes all open docs.
+            save: Whether to save changes before closing.
+        """
+        try:
+            import asyncio
+
+            if path:
+                p = Path(path).expanduser()
+
+                def _do_on_worker(word):
+                    # Close the specific document if open in this instance
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                d.Close(SaveChanges=int(bool(save)))
+                                return 1
+                        except Exception:
+                            continue
+                    return 0
+
+                async def _task_close_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                closed = await with_doc_lock(canonical_doc_key(str(p)), _task_close_path)
+                if closed:
+                    return "Closed document"
+                return "Document not open"
+            else:
+                def _do_close_all():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    from mcp_server.app_interaction.word_editor import get_word_app
+                    word = get_word_app()
+                    count = int(word.Documents.Count)
+                    try:
+                        word.DisplayAlerts = 0
+                    except Exception:
+                        pass
+                    # Close all documents in this instance
+                    for _ in range(count):
+                        try:
+                            word.ActiveDocument.Close(SaveChanges=int(bool(save)))
+                        except Exception:
+                            break
+                    return count
+
+                async def _task_close_all():
+                    return await asyncio.to_thread(_do_close_all)
+
+                closed = await with_global_lock(_task_close_all)
+                if closed:
+                    return f"Closed {closed} document(s)"
+                return "No documents open"
+        except Exception as e:
+            return f"ERROR: close_word failed: {e}"
+
+    @mcp.tool()
+    async def reveal_word(path: str = "") -> str:
+        """Make the Word window for a given path visible and activate it (debug aid).
+
+        If path is omitted, reveals the current Word instance managed by the active document.
+        """
+        try:
+            import asyncio
+            if path:
+                p = Path(path).expanduser()
+
+                def _do_on_worker(word):
+                    # Ensure instance is visible and activate matching document
+                    try:
+                        word.Visible = True
+                    except Exception:
+                        pass
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                d.Activate()
+                                try:
+                                    word.WindowState = 0  # wdWindowStateNormal
+                                except Exception:
+                                    pass
+                                return "Revealed"
+                        except Exception:
+                            continue
+                    return "Document not open in this instance"
+
+                async def _task_reveal():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                return await with_doc_lock(canonical_doc_key(str(p)), _task_reveal)
+            else:
+                def _do_reveal_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    from mcp_server.app_interaction.word_editor import get_word_app
+                    word = get_word_app()
+                    try:
+                        word.Visible = True
+                        word.WindowState = 0
+                    except Exception:
+                        pass
+                    return "Revealed"
+
+                async def _task_reveal_active():
+                    return await asyncio.to_thread(_do_reveal_active)
+
+                return await with_global_lock(_task_reveal_active)
+        except Exception as e:
+            return f"ERROR: reveal_word failed: {e}"
 
     return mcp

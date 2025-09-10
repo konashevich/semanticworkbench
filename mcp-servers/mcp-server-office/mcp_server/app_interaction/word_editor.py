@@ -37,18 +37,17 @@ def get_word_app():
     except Exception:
         # If not running, create a new instance
         word = win32.Dispatch("Word.Application")
-    # Make sure Word is visible so you can see your edits
-    word.Visible = True
+    # Keep Word hidden by default to prevent empty windows from appearing during headless operations
+    # (server tools will show or target documents explicitly when needed)
+    word.Visible = False
     return word
 
 
 def get_active_document(word):
-    """Return an active Word document, or create one if none is open."""
+    """Return the active Word document. Does not create a new one if none is open."""
     if word.Documents.Count == 0:
-        # If there are no documents, add a new one
-        return word.Documents.Add()
-    else:
-        return word.ActiveDocument
+        raise RuntimeError("No active document")
+    return word.ActiveDocument
 
 
 def get_document_content(doc):
