@@ -25,6 +25,7 @@ from mcp_server.app_interaction.word_editor import (
     apply_style_to_range,
     update_normal_style,
     apply_to_scope,
+    apply_to_scope_strict,
     clear_direct_formatting as clear_direct_fmt,
 )
 from mcp_server.markdown_edit.comment_analysis import run_comment_analysis
@@ -340,135 +341,75 @@ def create_mcp_server() -> FastMCP:
             return f"ERROR: get_word_content failed: {e}"
 
     @mcp.tool()
-    async def highlight_text(text: str, color: str | int = "yellow", path: str = "") -> str:
-        """Highlight the first occurrence of the given text in the active Word document.
+    async def highlight(
+        text: str,
+        scope: str = "first",
+        color: str | int = "yellow",
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        max_matches: int = 0,
+        path: str = "",
+    ) -> dict:
+        """Highlight text deterministically with enhanced validation.
 
         Args:
-            text: The exact text (case sensitive) to highlight.
-            color: One of the Word highlight colors (name or index). Use 0/none/clear to remove highlight.
-            path: Optional absolute path to a .docx file to target explicitly.
+            text: Text to search for (required, non-empty)
+            scope: "first" or "all" (default "first")
+            color: Highlight color - CSS color names, hex codes, or Word color constants
+            case_sensitive: Match case exactly if True
+            whole_word: Match whole words only if True  
+            max_matches: Limit number of matches (0 = no limit)
+            path: Optional path to specific document
+
         Returns:
-            Status message about the highlight result.
+            { matches: int, color: int, scope: str } or { error: str }
+        
+        Supported highlight colors: yellow, red, blue, green, pink, turquoise, bright_green, 
+        gray, dark_blue, dark_red, dark_yellow, dark_green, violet, teal, gray_25, gray_50, 
+        white, black, none/clear (to remove highlighting)
         """
+        # Enhanced validation
+        s = (scope or "first").strip().lower()
+        if s not in ("first", "all"):
+            return {"error": "Invalid scope. Use 'first' or 'all'"}
+        
+        if not (text or "").strip():
+            return {"error": "Text parameter is required and cannot be empty"}
+        
+        # Performance limit validation
+        if max_matches > 10000:
+            return {"error": "Maximum 10,000 matches allowed for performance reasons"}
+        
         try:
-            from mcp_server.app_interaction.word_editor import get_word_app, get_active_document
             import asyncio
-
-            if path:
-                from mcp_server.path_utils import resolve_user_path
-                p = resolve_user_path(path)
-                if not p.is_file():
-                    return f"ERROR: File not found: {p}"
-                hci = _parse_highlight_color(color)
-
-                def _do_on_worker(word):
-                    _prepare_file_for_edit(p)
-                    # Find or open the target document
-                    target = None
-                    for i in range(1, word.Documents.Count + 1):
-                        try:
-                            d = word.Documents(i)
-                            if _paths_equal(p, d.FullName):
-                                target = d
-                                break
-                        except Exception:
-                            continue
-                    if target is None:
-                        try:
-                            target = word.Documents.Open(str(p), ReadOnly=False)
-                        except Exception:
-                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
-                    try:
-                        _make_doc_editable(target)
-                    except Exception:
-                        pass
-                    rng = target.Content
-                    rng.Find.ClearFormatting()
-                    found = rng.Find.Execute(FindText=text, MatchCase=True, MatchWholeWord=False, Wrap=0, Forward=True)
-                    if not found:
-                        if AUTO_CLOSE:
-                            try:
-                                target.Close(SaveChanges=0)
-                            except Exception:
-                                pass
-                        return "Text not found"
-                    rng.HighlightColorIndex = hci
-                    try:
-                        target.Save()
-                    except Exception:
-                        pass
-                    msg = "Highlighted"
-                    if AUTO_CLOSE:
-                        try:
-                            target.Close(SaveChanges=0)
-                        except Exception:
-                            pass
-                    return msg
-
-                async def _task_hl_path():
-                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
-
-                return await with_doc_lock(canonical_doc_key(str(p)), _task_hl_path)
+            hci = _parse_highlight_color(color)
+            
+            # Enhanced color validation - validate all color inputs
+            valid_colors = list(HIGHLIGHT_COLOR_MAP.keys())
+            
+            # Validate color input
+            color_error = None
+            if isinstance(color, str):
+                if color.strip().lower() not in valid_colors:
+                    color_error = f"Invalid highlight color '{color}'. Supported colors: {', '.join(sorted(set(valid_colors)))}, or integers 0-16"
+            elif isinstance(color, (int, float)):
+                try:
+                    int_color = int(color)
+                    if int_color < 0 or int_color > 16:
+                        color_error = f"Invalid highlight color '{color}'. Supported integer range: 0-16"
+                except (ValueError, TypeError):
+                    color_error = f"Invalid highlight color '{color}'. Must be a valid color name or integer 0-16"
             else:
-                hci = _parse_highlight_color(color)
-
-                def _do_highlight():
-                    try:
-                        import pythoncom  # type: ignore
-                        pythoncom.CoInitialize()
-                    except Exception:
-                        pass
-                    word = get_word_app()
-                    if word.Documents.Count == 0:
-                        return "ERROR: No document is open. Provide 'path' or open one."
-                    if word.Documents.Count > 1:
-                        return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
-                    doc = get_active_document(word)
-                    try:
-                        if getattr(doc, "ReadOnly", False):
-                            return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
-                    except Exception:
-                        pass
-                    rng = doc.Content
-                    rng.Find.ClearFormatting()
-                    found = rng.Find.Execute(FindText=text, MatchCase=True, MatchWholeWord=False, Wrap=0, Forward=True)
-                    if not found:
-                        return "Text not found"
-                    rng.HighlightColorIndex = hci
-                    return "Highlighted"
-
-                async def _task_hl_active():
-                    return await asyncio.to_thread(_do_highlight)
-
-                return await with_global_lock(_task_hl_active)
-        except Exception as e:
-            return f"ERROR: highlight_text failed: {e}"
-
-    @mcp.tool()
-    async def highlight_all(text: str, case_sensitive: bool = False, whole_word: bool = False, max_matches: int = 0, color: str | int = "yellow", path: str = "") -> str:
-        """Highlight every occurrence of a string in the active Word document.
-
-        Args:
-            text: The text to search for (must be non-empty).
-            case_sensitive: Match case exactly if True.
-            whole_word: Match whole words only if True.
-            max_matches: 0 = no limit, otherwise stop after this many highlights.
-            color: One of the Word highlight colors (name or index). Use 0/none/clear to remove highlight.
-            path: Optional absolute path to a .docx file to target explicitly.
-
-        Returns:
-            Summary string with number of highlights applied or an error message.
-        """
-        if not text.strip():
-            return "ERROR: highlight_all requires non-empty text"
-        try:
-            import asyncio
+                color_error = f"Invalid highlight color type. Must be string or integer, got {type(color).__name__}"
+            
+            if color_error:
+                return {"error": color_error}
+            
             if path:
                 from mcp_server.path_utils import resolve_user_path
                 p = resolve_user_path(path)
                 if not p.is_file():
-                    return f"ERROR: File not found: {p}"
-                hci = _parse_highlight_color(color)
+                    return {"error": f"File not found: {p}"}
 
                 def _do_on_worker(word):
                     _prepare_file_for_edit(p)
@@ -506,7 +447,7 @@ def create_mcp_server() -> FastMCP:
                         current_end = rng.End
                         rng.HighlightColorIndex = hci
                         count += 1
-                        if max_matches and count >= max_matches:
+                        if s == 'first' or (max_matches and count >= max_matches):
                             break
                         start_pos = current_end
                         if start_pos >= target.Content.End:
@@ -515,6 +456,9 @@ def create_mcp_server() -> FastMCP:
                         rng.Find.ClearFormatting()
                         found = rng.Find.Execute(**flags)
                         if found and rng.End <= current_end:
+                            break
+                        # Performance check
+                        if count >= 10000:
                             break
                     if count:
                         try:
@@ -528,13 +472,12 @@ def create_mcp_server() -> FastMCP:
                             pass
                     return count
 
-                async def _task_hla_path():
+                async def _task_hl_path():
                     return await _run_on_worker_with_cleanup(p, _do_on_worker)
 
-                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_hla_path)
+                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_hl_path)
             else:
-                hci = _parse_highlight_color(color)
-                def _do_all_active():
+                def _do_active():
                     try:
                         import pythoncom  # type: ignore
                         pythoncom.CoInitialize()
@@ -567,7 +510,7 @@ def create_mcp_server() -> FastMCP:
                         current_end = rng.End
                         rng.HighlightColorIndex = hci
                         count += 1
-                        if max_matches and count >= max_matches:
+                        if s == 'first' or (max_matches and count >= max_matches):
                             break
                         start_pos = current_end
                         if start_pos >= doc.Content.End:
@@ -577,23 +520,462 @@ def create_mcp_server() -> FastMCP:
                         found = rng.Find.Execute(**flags)
                         if found and rng.End <= current_end:
                             break
+                        # Performance check
+                        if count >= 10000:
+                            break
                     return count
 
-                async def _task_hla_active():
-                    return await asyncio.to_thread(_do_all_active)
+                async def _task_hl_active():
+                    return await asyncio.to_thread(_do_active)
 
-                applied = await with_global_lock(_task_hla_active)
+                applied = await with_global_lock(_task_hl_active)
                 if applied == -1:
-                    return "ERROR: No document is open. Provide 'path' or open one."
+                    return {"error": "No document is open. Provide 'path' or open one."}
                 if applied == -2:
-                    return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                    return {"error": "Multiple documents are open. Provide 'path' to target the right file."}
                 if applied == -3:
-                    return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
-            if applied == 0:
-                return "No matches highlighted"
-            return f"Highlighted {applied} occurrence(s)"
+                    return {"error": "Active document is read-only. Provide 'path' to edit a writable copy."}
+            return {"matches": int(applied), "color": int(hci), "scope": s}
         except Exception as e:
-            return f"ERROR: highlight_all failed: {e}"
+            return {"error": f"highlight failed: {e}"}
+
+    @mcp.tool()
+    async def batch_format(
+        scope: str = "document",
+        operations: list[dict] | None = None,
+        find: dict | str = "",
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        max_matches: int = 0,
+        path: str = "",
+    ) -> dict:
+        """Apply multiple deterministic formatting operations in order to a scope with atomic behavior.
+
+        Atomic Behavior: All-or-nothing execution. If any operation fails validation or execution, 
+        no changes are applied to the document.
+
+        Performance Limits: Maximum 50 operations per call, maximum 10,000 text matches processed.
+
+        Supported op keys within each item of `operations`:
+        - font: { name?, size?, color?, bold?, italic?, underline?, strikethrough?, superscript?, subscript? }
+        - paragraph: { alignment?, line_spacing_rule?, line_spacing?, space_before?, space_after? }
+        - list: { type: "bullet" | "numbered" | "none" }
+        - style: { name }
+        - clear_formatting: { target?: "all" | "font" | "paragraph" }
+        - document_base_font: { name?, size?, color?, bold?, italic?, underline? }
+
+        Color formats supported: CSS color names ("red", "blue"), hex codes ("#FF0000"), Word color constants (16711680).
+        Font sizes: 1-1638 points. Paragraph spacing: 0-1584 points.
+        """
+        try:
+            ops = operations or []
+            if not isinstance(ops, list) or not ops:
+                return {"changed": False, "summary": {"operations": 0, "ranges_affected": 0}, "details": []}
+
+            # Performance limit validation
+            if len(ops) > 50:
+                return {"error": "Maximum 50 operations allowed per call"}
+
+            # Scope validation
+            s = (scope or "document").strip().lower()
+            if s not in ("document", "selection", "matches"):
+                return {"error": "Invalid scope. Use 'document', 'selection', or 'matches'"}
+
+            def _validate_ops(ops_: list[dict]) -> str | None:
+                for idx, op in enumerate(ops_):
+                    if not isinstance(op, dict) or not op:
+                        return f"Invalid operation at index {idx}"
+                    
+                    # Font validation
+                    if "font" in op:
+                        fnt = op["font"]
+                        if not isinstance(fnt, dict):
+                            return f"Invalid font object at index {idx}"
+                        
+                        # Mutual exclusion check
+                        if fnt.get("superscript") and fnt.get("subscript"):
+                            return "Superscript and subscript are mutually exclusive"
+                        
+                        # Font size validation
+                        if "size" in fnt and fnt["size"] is not None:
+                            try:
+                                size = int(fnt["size"])
+                                if size < 1 or size > 1638:
+                                    return f"Font size must be between 1 and 1638 points at index {idx}"
+                            except (ValueError, TypeError):
+                                return f"Invalid font size at index {idx}"
+                        
+                        # Color validation
+                        if "color" in fnt and fnt["color"] is not None and fnt["color"] != "":
+                            color_val = parse_font_color(fnt["color"])
+                            if color_val is None:
+                                return f"Invalid font color '{fnt['color']}' at index {idx}. Use CSS color names, hex codes (#FF0000), or Word color constants"
+                    
+                    # Paragraph validation
+                    if "paragraph" in op:
+                        para = op["paragraph"]
+                        if not isinstance(para, dict):
+                            return f"Invalid paragraph object at index {idx}"
+                        
+                        # Alignment validation
+                        if "alignment" in para and para["alignment"]:
+                            align = str(para["alignment"]).lower()
+                            if align not in ("left", "center", "right", "justify"):
+                                return f"Invalid alignment '{para['alignment']}' at index {idx}. Use: left, center, right, justify"
+                        
+                        # Spacing validation
+                        for spacing_key in ("space_before", "space_after"):
+                            if spacing_key in para and para[spacing_key] is not None:
+                                try:
+                                    spacing = float(para[spacing_key])
+                                    if spacing < 0 or spacing > 1584:
+                                        return f"{spacing_key} must be between 0 and 1584 points at index {idx}"
+                                except (ValueError, TypeError):
+                                    return f"Invalid {spacing_key} value at index {idx}"
+                        
+                        # Line spacing validation
+                        if "line_spacing_rule" in para and para["line_spacing_rule"]:
+                            rule = str(para["line_spacing_rule"]).lower()
+                            if rule not in ("single", "1.5", "double", "multiple", "exact", "minimum"):
+                                return f"Invalid line_spacing_rule '{para['line_spacing_rule']}' at index {idx}"
+                    
+                    # List validation
+                    if "list" in op:
+                        list_obj = op["list"]
+                        if not isinstance(list_obj, dict):
+                            return f"Invalid list object at index {idx}"
+                        t = str(list_obj.get("type", "")).lower()
+                        if t not in ("bullet", "numbered", "none"):
+                            return f"Invalid list type '{list_obj.get('type')}' at index {idx}. Use: bullet, numbered, none"
+                    
+                    # Style validation will happen during execution for style existence
+                    
+                    # Clear formatting validation
+                    if "clear_formatting" in op:
+                        cf = op["clear_formatting"]
+                        if isinstance(cf, dict) and "target" in cf:
+                            target = str(cf["target"]).lower()
+                            if target not in ("all", "font", "paragraph"):
+                                return f"Invalid clear_formatting target '{cf['target']}' at index {idx}. Use: all, font, paragraph"
+                    
+                    # Document base font validation
+                    if "document_base_font" in op:
+                        base = op["document_base_font"]
+                        if not isinstance(base, dict):
+                            return f"Invalid document_base_font object at index {idx}"
+                        
+                        # Size validation
+                        if "size" in base and base["size"] is not None:
+                            try:
+                                size = int(base["size"])
+                                if size < 1 or size > 1638:
+                                    return f"Document base font size must be between 1 and 1638 points at index {idx}"
+                            except (ValueError, TypeError):
+                                return f"Invalid document base font size at index {idx}"
+                        
+                        # Color validation
+                        if "color" in base and base["color"] is not None and base["color"] != "":
+                            color_val = parse_font_color(base["color"])
+                            if color_val is None:
+                                return f"Invalid document base font color '{base['color']}' at index {idx}"
+                
+                return None
+
+            msg = _validate_ops(ops)
+            if msg:
+                return {"error": msg}
+
+            # Decode find input (support object form)
+            find_text: str = ""
+            f_case = bool(case_sensitive)
+            f_whole = bool(whole_word)
+            f_max = int(max_matches or 0)
+            if isinstance(find, dict):
+                find_text = str(find.get("text", "") or "")
+                f_case = bool(find.get("case_sensitive", f_case))
+                f_whole = bool(find.get("whole_word", f_whole))
+                f_max = int(find.get("max_matches", f_max) or 0)
+            else:
+                find_text = str(find or "")
+            if s == "matches" and not find_text.strip():
+                return {"error": "When scope=='matches', provide find.text (or 'find' string)"}
+
+            # Performance limit for matches
+            if f_max > 10000:
+                return {"error": "Maximum 10,000 matches allowed for performance reasons"}
+
+            # Check for superscript/subscript conflicts across operations for same scope
+            wants_super = any(isinstance(op, dict) and "font" in op and dict(op["font"]).get("superscript") for op in ops)
+            wants_sub = any(isinstance(op, dict) and "font" in op and dict(op["font"]).get("subscript") for op in ops)
+            if wants_super and wants_sub:
+                return {"error": "Superscript and subscript are mutually exclusive for the same target range"}
+
+            def _apply_ops_atomic(word, doc):
+                """Apply all operations atomically with rollback on failure."""
+                import tempfile
+                import os
+                from mcp_server.app_interaction.word_editor import get_selection
+                
+                # First, validate that we can execute all operations without actually changing anything
+                validation_errors = []
+                
+                # Validate style existence
+                for idx, op in enumerate(ops):
+                    if "style" in op:
+                        style_name = (op["style"].get("name") or "").strip()
+                        if style_name:
+                            try:
+                                _ = doc.Styles(style_name)
+                            except Exception:
+                                validation_errors.append(f"Unknown style '{style_name}' at operation {idx}")
+                
+                if validation_errors:
+                    raise ValueError("; ".join(validation_errors))
+                
+                # Check if selection scope has an actual selection
+                if s == "selection":
+                    sel = get_selection(word)
+                    if sel is None or sel.Range.Start == sel.Range.End:
+                        raise ValueError("Selection scope requires an active text selection")
+                
+                # Save document content for potential rollback (without closing document)
+                undo_record_started = False
+                try:
+                    # Start an undo record for atomic rollback
+                    doc.UndoRecord.StartCustomRecord("Batch Format Operations")
+                    undo_record_started = True
+                except Exception:
+                    undo_record_started = False  # Fallback: no atomic rollback capability
+                
+                try:
+                    # Track distinct ranges changed across the entire batch
+                    distinct_changed: set[tuple[int, int]] = set()
+                    total_ranges = 0
+                    details: list[dict] = []
+                    total_matches_processed = 0  # Track actual text matches, not operations
+
+                    def _make_fn(op: dict):
+                        if "font" in op:
+                            f = op["font"]
+                            # Validate color early if provided
+                            color_in = f.get("color") if isinstance(f, dict) else None
+                            if color_in is not None and color_in != "":
+                                cv = parse_font_color(color_in)
+                                if cv is None:
+                                    raise ValueError(f"Invalid font color: {color_in}")
+                                color_val = cv
+                            else:
+                                color_val = None
+                            return "font", (lambda rng: set_range_font(
+                                rng,
+                                name=(f.get("name") or "").strip() or None,
+                                size=f.get("size"),
+                                color=color_val,
+                                bold=f.get("bold"),
+                                italic=f.get("italic"),
+                                underline=f.get("underline"),
+                                strikethrough=f.get("strikethrough"),
+                                superscript=f.get("superscript"),
+                                subscript=f.get("subscript"),
+                            ))
+                        if "paragraph" in op:
+                            p = op["paragraph"]
+                            # Accept alias line_spacing_rule as shorthand
+                            ls_val = (p.get("line_spacing_rule") or p.get("line_spacing") or "").strip() or None
+                            return "paragraph", (lambda rng: set_range_paragraph(
+                                rng,
+                                alignment=(p.get("alignment") or "").strip() or None,
+                                line_spacing=ls_val,
+                                space_before=p.get("space_before"),
+                                space_after=p.get("space_after"),
+                            ))
+                        if "list" in op:
+                            t = str(op["list"].get("type", "")).lower()
+                            return "list", (lambda rng: apply_list_format(rng, t))
+                        if "style" in op:
+                            s_ = (op["style"].get("name") or "").strip()
+                            return "style", (lambda rng: apply_style_to_range(rng, s_))
+                        if "clear_formatting" in op:
+                            cf = op["clear_formatting"] if isinstance(op["clear_formatting"], dict) else {}
+                            tgt = (cf.get("target") or "all").strip().lower()
+                            if tgt not in ("all", "font", "paragraph"):
+                                tgt = "all"
+                            return "clear_formatting", (lambda rng, t=tgt: clear_direct_fmt(rng, target=t))
+                        if "document_base_font" in op:
+                            b = op["document_base_font"]
+                            # Validate color if provided
+                            color_in = b.get("color") if isinstance(b, dict) else None
+                            color_val_db = None
+                            if color_in is not None and color_in != "":
+                                cv = parse_font_color(color_in)
+                                if cv is None:
+                                    raise ValueError(f"Invalid base font color: {color_in}")
+                                color_val_db = cv
+                            return "document_base_font", (lambda _rng: update_normal_style(
+                                doc,
+                                name=(b.get("name") or "").strip() or None,
+                                size=b.get("size"),
+                                color=color_val_db,
+                                bold=b.get("bold"),
+                                italic=b.get("italic"),
+                                underline=b.get("underline"),
+                            ))
+                        return "unknown", lambda _r: None
+
+                    def _collect_changed(rng):
+                        try:
+                            s_pos = int(getattr(rng, 'Start', -1))
+                            e_pos = int(getattr(rng, 'End', -1))
+                            if s_pos >= 0 and e_pos >= 0 and e_pos >= s_pos:
+                                distinct_changed.add((s_pos, e_pos))
+                        except Exception:
+                            pass
+
+                    # Count total text matches that will be processed for performance validation
+                    if s == "matches" and find_text:
+                        from mcp_server.app_interaction.word_editor import iter_find_ranges
+                        match_count = 0
+                        for _ in iter_find_ranges(doc, find_text, match_case=f_case, whole_word=f_whole, max_matches=f_max):
+                            match_count += 1
+                            if match_count > 10000:
+                                raise ValueError("Performance limit exceeded: more than 10,000 text matches would be processed")
+                        total_matches_processed = match_count * len(ops)  # Each operation processes all matches
+
+                    for idx, op in enumerate(ops):
+                        op_type, fn = _make_fn(op)
+                        if op_type == "unknown":
+                            details.append({"op_index": idx, "op_type": op_type, "ranges_affected": 0})
+                            continue
+                        
+                        # Use enhanced apply_to_scope that errors on empty selection
+                        applied = apply_to_scope_strict(
+                            word,
+                            doc,
+                            s,
+                            find_text=find_text,
+                            match_case=f_case,
+                            whole_word=f_whole,
+                            max_matches=f_max,
+                            fn=fn,
+                            on_applied=_collect_changed,
+                        )
+                        total_ranges += applied
+                        details.append({"op_index": idx, "op_type": op_type, "ranges_affected": applied})
+                    
+                    return len(distinct_changed), details, total_matches_processed
+                
+                except Exception as e:
+                    # Rollback using Word's Undo mechanism (preserves document reference)
+                    if undo_record_started:
+                        try:
+                            doc.UndoRecord.EndCustomRecord()
+                            doc.Undo()  # Undo all operations in the record
+                            raise ValueError(f"Operation failed and changes were undone: {e}")
+                        except Exception:
+                            # If undo fails, just raise the original error
+                            pass
+                    raise e
+                finally:
+                    # End undo record if it was started
+                    if undo_record_started:
+                        try:
+                            doc.UndoRecord.EndCustomRecord()
+                        except Exception:
+                            pass
+
+            if path:
+                from mcp_server.path_utils import resolve_user_path
+                import os
+                p = resolve_user_path(path)
+                if not p.is_file():
+                    return {"error": f"File not found: {p}"}
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    # Find or open the target document
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+                    try:
+                        rngs, det, matches_processed = _apply_ops_atomic(word, target)
+                    except Exception as ex:
+                        return {"__error__": str(ex)}
+                    if rngs:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return rngs, det, matches_processed
+
+                async def _task_batch_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                res = await with_doc_lock(canonical_doc_key(str(p)), _task_batch_path)
+                if isinstance(res, dict) and "__error__" in res:
+                    return {"error": res["__error__"]}
+                total, details, matches_processed = res
+            else:
+                import asyncio
+                from mcp_server.app_interaction.word_editor import get_selection, apply_to_scope_strict
+                
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return -1, []
+                    if word.Documents.Count > 1:
+                        return -2, []
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return -3, []
+                    except Exception:
+                        pass
+                    try:
+                        return _apply_ops_atomic(word, doc)
+                    except Exception as ex:
+                        return {"__error__": str(ex)}
+
+                async def _task_batch_active():
+                    return await asyncio.to_thread(_do_active)
+
+                res = await with_global_lock(_task_batch_active)
+                if isinstance(res, dict) and "__error__" in res:
+                    return {"error": res["__error__"]}
+                total, details, matches_processed = res
+                if total == -1:
+                    return {"error": "No document is open. Provide 'path' or open one."}
+                if total == -2:
+                    return {"error": "Multiple documents are open. Provide 'path' to target the right file."}
+                if total == -3:
+                    return {"error": "Active document is read-only. Provide 'path' to edit a writable copy."}
+            return {"changed": total > 0, "summary": {"text_matches_processed": matches_processed, "ranges_affected": int(total) }, "details": details}
+        except Exception as e:
+            return {"error": f"batch_format failed: {e}"}
 
     @mcp.tool()
     async def search_and_replace(
@@ -937,7 +1319,7 @@ def create_mcp_server() -> FastMCP:
                         pass
 
                     def _apply(rng):
-                        set_range_font(
+                        return set_range_font(
                             rng,
                             name=name.strip() or None,
                             size=size,
@@ -995,7 +1377,7 @@ def create_mcp_server() -> FastMCP:
                         pass
 
                     def _apply(rng):
-                        set_range_font(
+                        return set_range_font(
                             rng,
                             name=name.strip() or None,
                             size=size,
@@ -1083,7 +1465,7 @@ def create_mcp_server() -> FastMCP:
                         pass
 
                     def _apply(rng):
-                        set_range_paragraph(
+                        return set_range_paragraph(
                             rng,
                             alignment=alignment.strip() or None,
                             line_spacing=line_spacing.strip() or None,
@@ -1139,7 +1521,7 @@ def create_mcp_server() -> FastMCP:
                         pass
 
                     def _apply(rng):
-                        set_range_paragraph(
+                        return set_range_paragraph(
                             rng,
                             alignment=alignment.strip() or None,
                             line_spacing=line_spacing.strip() or None,
@@ -1217,7 +1599,7 @@ def create_mcp_server() -> FastMCP:
                         pass
 
                     def _apply(rng):
-                        apply_list_format(rng, lt)
+                        return apply_list_format(rng, lt)
 
                     applied = apply_to_scope(
                         word,
@@ -1267,7 +1649,7 @@ def create_mcp_server() -> FastMCP:
                         pass
 
                     def _apply(rng):
-                        apply_list_format(rng, lt)
+                        return apply_list_format(rng, lt)
 
                     applied = apply_to_scope(
                         word,
@@ -1337,15 +1719,16 @@ def create_mcp_server() -> FastMCP:
                     except Exception:
                         pass
 
-                    applied = 0
+                    # Pre-validate style existence
+                    try:
+                        _ = target.Styles(style_name)
+                    except Exception:
+                        return {"__error__": f"Unknown style: {style_name}"}
 
                     def _apply(rng):
-                        nonlocal applied
-                        if apply_style_to_range(rng, style_name):
-                            applied += 1
+                        return apply_style_to_range(rng, style_name)
 
-                    # Use selection/document/matches
-                    _ = apply_to_scope(
+                    applied = apply_to_scope(
                         word,
                         target,
                         scope,
@@ -1370,7 +1753,10 @@ def create_mcp_server() -> FastMCP:
                 async def _task_applystyle_path():
                     return await _run_on_worker_with_cleanup(p, _do_on_worker)
 
-                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_applystyle_path)
+                res = await with_doc_lock(canonical_doc_key(str(p)), _task_applystyle_path)
+                if isinstance(res, dict) and "__error__" in res:
+                    return res["__error__"]
+                applied = res
             else:
                 import asyncio
 
@@ -1391,14 +1777,16 @@ def create_mcp_server() -> FastMCP:
                             return -3
                     except Exception:
                         pass
-                    applied = 0
+                    # Pre-validate style existence
+                    try:
+                        _ = doc.Styles(style_name)
+                    except Exception:
+                        return {"__error__": f"Unknown style: {style_name}"}
 
                     def _apply(rng):
-                        nonlocal applied
-                        if apply_style_to_range(rng, style_name):
-                            applied += 1
+                        return apply_style_to_range(rng, style_name)
 
-                    _ = apply_to_scope(
+                    applied = apply_to_scope(
                         word,
                         doc,
                         scope,
@@ -1413,7 +1801,10 @@ def create_mcp_server() -> FastMCP:
                 async def _task_applystyle_active():
                     return await asyncio.to_thread(_do_active)
 
-                applied = await with_global_lock(_task_applystyle_active)
+                res = await with_global_lock(_task_applystyle_active)
+                if isinstance(res, dict) and "__error__" in res:
+                    return res["__error__"]
+                applied = res
                 if applied == -1:
                     return "ERROR: No document is open. Provide 'path' or open one."
                 if applied == -2:
@@ -1463,7 +1854,7 @@ def create_mcp_server() -> FastMCP:
                         pass
 
                     def _apply(rng):
-                        clear_direct_fmt(rng)
+                        return clear_direct_fmt(rng)
 
                     applied = apply_to_scope(
                         word,
@@ -1513,7 +1904,7 @@ def create_mcp_server() -> FastMCP:
                         pass
 
                     def _apply(rng):
-                        clear_direct_fmt(rng)
+                        return clear_direct_fmt(rng)
 
                     applied = apply_to_scope(
                         word,

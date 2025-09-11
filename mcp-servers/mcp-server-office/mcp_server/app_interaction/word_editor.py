@@ -637,30 +637,89 @@ def iter_find_ranges(doc, find_text: str, *, match_case: bool = False, whole_wor
             break
 
 
-def set_range_font(rng, *, name: str | None = None, size: float | int | None = None, color: int | None = None, bold: bool | None = None, italic: bool | None = None, underline: bool | None = None) -> None:
-    """Apply character-level formatting to a range, if options provided."""
+def set_range_font(
+    rng,
+    *,
+    name: str | None = None,
+    size: float | int | None = None,
+    color: int | None = None,
+    bold: bool | None = None,
+    italic: bool | None = None,
+    underline: bool | None = None,
+    strikethrough: bool | None = None,
+    superscript: bool | None = None,
+    subscript: bool | None = None,
+    ) -> bool:
+    """Apply character-level formatting to a range. Returns True if any change applied."""
+    changed = False
     try:
         f = rng.Font
-        if name:
+        if name and getattr(f, "Name", None) != name:
             f.Name = name
+            changed = True
         if size is not None:
             try:
-                f.Size = float(size)
+                if float(getattr(f, "Size", 0)) != float(size):
+                    f.Size = float(size)
+                    changed = True
             except Exception:
                 pass
         if color is not None:
             try:
-                f.Color = int(color)
+                if int(getattr(f, "Color", -1)) != int(color):
+                    f.Color = int(color)
+                    changed = True
             except Exception:
                 pass
-        if bold is not None:
+        if bold is not None and bool(getattr(f, "Bold", False)) != bool(bold):
             f.Bold = bool(bold)
-        if italic is not None:
+            changed = True
+        if italic is not None and bool(getattr(f, "Italic", False)) != bool(italic):
             f.Italic = bool(italic)
+            changed = True
         if underline is not None:
-            f.Underline = 1 if underline else 0  # wdUnderlineSingle=1, wdUnderlineNone=0
+            target = 1 if underline else 0
+            try:
+                if int(getattr(f, "Underline", 0)) != target:
+                    f.Underline = target  # wdUnderlineSingle=1, wdUnderlineNone=0
+                    changed = True
+            except Exception:
+                pass
+        if strikethrough is not None:
+            try:
+                if bool(getattr(f, "StrikeThrough", False)) != bool(strikethrough):
+                    f.StrikeThrough = bool(strikethrough)
+                    changed = True
+            except Exception:
+                pass
+        # Superscript and subscript are mutually exclusive at the Font level
+        if superscript is not None:
+            try:
+                if bool(getattr(f, "Superscript", False)) != bool(superscript):
+                    f.Superscript = bool(superscript)
+                    changed = True
+                if superscript:
+                    with suppress(Exception):
+                        if bool(getattr(f, "Subscript", False)):
+                            f.Subscript = False
+                            changed = True
+            except Exception:
+                pass
+        if subscript is not None:
+            try:
+                if bool(getattr(f, "Subscript", False)) != bool(subscript):
+                    f.Subscript = bool(subscript)
+                    changed = True
+                if subscript:
+                    with suppress(Exception):
+                        if bool(getattr(f, "Superscript", False)):
+                            f.Superscript = False
+                            changed = True
+            except Exception:
+                pass
     except Exception:
         pass
+    return changed
 
 
 _ALIGN_MAP = {
@@ -700,64 +759,148 @@ def _parse_line_spacing(value: str) -> tuple[int, float] | None:
     return None
 
 
-def set_range_paragraph(rng, *, alignment: str | None = None, line_spacing: str | None = None, space_before: float | int | None = None, space_after: float | int | None = None) -> None:
+def set_range_paragraph(rng, *, alignment: str | None = None, line_spacing: str | None = None, space_before: float | int | None = None, space_after: float | int | None = None) -> bool:
+    changed = False
     try:
         p = rng.ParagraphFormat
         if alignment:
             val = _ALIGN_MAP.get(str(alignment).lower())
-            if val is not None:
+            if val is not None and getattr(p, "Alignment", None) != val:
                 p.Alignment = val
+                changed = True
         if line_spacing:
             res = _parse_line_spacing(line_spacing)
             if res:
                 rule, pt = res
-                p.LineSpacingRule = rule
+                try:
+                    if getattr(p, "LineSpacingRule", None) != rule:
+                        p.LineSpacingRule = rule
+                        changed = True
+                except Exception:
+                    pass
                 if pt:
-                    p.LineSpacing = pt
+                    try:
+                        if float(getattr(p, "LineSpacing", 0.0)) != float(pt):
+                            p.LineSpacing = float(pt)
+                            changed = True
+                    except Exception:
+                        pass
         if space_before is not None:
             try:
-                p.SpaceBefore = float(space_before)
+                if float(getattr(p, "SpaceBefore", 0.0)) != float(space_before):
+                    p.SpaceBefore = float(space_before)
+                    changed = True
             except Exception:
                 pass
         if space_after is not None:
             try:
-                p.SpaceAfter = float(space_after)
+                if float(getattr(p, "SpaceAfter", 0.0)) != float(space_after):
+                    p.SpaceAfter = float(space_after)
+                    changed = True
             except Exception:
                 pass
     except Exception:
         pass
+    return changed
 
 
-def apply_list_format(rng, list_type: str) -> None:
+def apply_list_format(rng, list_type: str) -> bool:
+    changed = False
     try:
         lf = rng.ListFormat
         t = str(list_type).lower()
+        before = getattr(lf, "ListType", 0)
         if t == "bullet":
-            lf.ApplyBulletDefault()
+            with suppress(Exception):
+                lf.ApplyBulletDefault()
+            after = getattr(lf, "ListType", 0)
+            changed = before != after
         elif t == "numbered":
-            lf.ApplyNumberDefault()
+            with suppress(Exception):
+                lf.ApplyNumberDefault()
+            after = getattr(lf, "ListType", 0)
+            changed = before != after
         elif t == "none":
             # Best-effort remove any list formatting
             with suppress(Exception):
                 lf.RemoveNumbers()
             with suppress(Exception):
                 lf.RemoveBullets()
+            after = getattr(lf, "ListType", 0)
+            changed = before != after
     except Exception:
         pass
+    return changed
 
 
 def apply_style_to_range(rng, style_name: str) -> bool:
+    """Apply a style idempotently, respecting style type.
+
+    - Character style: apply to the entire range as a character style.
+    - Paragraph style: apply to each paragraph in the range as needed.
+    Falls back to range-level assignment if style metadata isn't available.
+    """
+    # Try to detect style type (1=paragraph, 2=character)
+    style_type = None
+    try:
+        doc = getattr(rng, "Document", None)
+        if doc is not None:
+            try:
+                s = doc.Styles(style_name)
+                style_type = getattr(s, "Type", None)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Character style path
+    if style_type == 2:
+        try:
+            current = None
+            try:
+                current = rng.Style
+            except Exception:
+                pass
+            if str(current) != style_name:
+                rng.Style = style_name
+                return True
+        except Exception:
+            pass
+        return False
+
+    # Paragraph style (or unknown type): apply per paragraph where needed
+    changed = False
     try:
         para = rng.Paragraphs
         if para is not None and para.Count > 0:
-            para(1).Style = style_name
-            return True
+            for i in range(1, int(para.Count) + 1):
+                try:
+                    cur = None
+                    try:
+                        cur = para(i).Style
+                    except Exception:
+                        pass
+                    if str(cur) != style_name:
+                        para(i).Style = style_name
+                        changed = True
+                except Exception:
+                    continue
+            return changed
     except Exception:
+        pass
+
+    # Fallback: set on range if paragraphs not available
+    try:
+        current = None
         try:
-            rng.Style = style_name
-            return True
+            current = rng.Style
         except Exception:
             pass
+        if str(current) != style_name:
+            rng.Style = style_name
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -766,68 +909,239 @@ def update_normal_style(doc, *, name: str | None = None, size: float | int | Non
         styles = doc.Styles
         normal = styles("Normal")
         f = normal.Font
-        if name:
+        changed = False
+        if name and getattr(f, "Name", None) != name:
             f.Name = name
+            changed = True
         if size is not None:
             try:
-                f.Size = float(size)
+                if float(getattr(f, "Size", 0)) != float(size):
+                    f.Size = float(size)
+                    changed = True
             except Exception:
                 pass
         if color is not None:
             try:
-                f.Color = int(color)
+                if int(getattr(f, "Color", -1)) != int(color):
+                    f.Color = int(color)
+                    changed = True
             except Exception:
                 pass
-        if bold is not None:
+        if bold is not None and bool(getattr(f, "Bold", False)) != bool(bold):
             f.Bold = bool(bold)
-        if italic is not None:
+            changed = True
+        if italic is not None and bool(getattr(f, "Italic", False)) != bool(italic):
             f.Italic = bool(italic)
+            changed = True
         if underline is not None:
-            f.Underline = 1 if underline else 0
-        return True
+            target = 1 if underline else 0
+            try:
+                if int(getattr(f, "Underline", 0)) != target:
+                    f.Underline = target
+                    changed = True
+            except Exception:
+                pass
+        return changed
     except Exception:
         return False
 
-
-def clear_direct_formatting(rng) -> None:
-    """Clear direct font & paragraph formatting (keep styles)."""
+def _snapshot_font(f):
+    """Return a tuple snapshot of key Font properties for idempotence checks."""
     try:
-        with suppress(Exception):
-            rng.Font.Reset()
-        with suppress(Exception):
-            rng.ParagraphFormat.Reset()
+        return (
+            str(getattr(f, "Name", "")),
+            float(getattr(f, "Size", 0.0) or 0.0),
+            int(getattr(f, "Color", -1) or -1),
+            int(getattr(f, "ColorIndex", -1) or -1),
+            bool(getattr(f, "Bold", False)),
+            bool(getattr(f, "Italic", False)),
+            int(getattr(f, "Underline", 0) or 0),
+            bool(getattr(f, "StrikeThrough", False)),
+            bool(getattr(f, "Superscript", False)),
+            bool(getattr(f, "Subscript", False)),
+            bool(getattr(f, "Hidden", False)),
+            bool(getattr(f, "SmallCaps", False)),
+            bool(getattr(f, "AllCaps", False)),
+            bool(getattr(f, "Shadow", False)),
+            bool(getattr(f, "Outline", False)),
+            bool(getattr(f, "Emboss", False)),
+            bool(getattr(f, "Engrave", False)),
+            float(getattr(f, "Kerning", 0.0) or 0.0),
+            float(getattr(f, "Spacing", 0.0) or 0.0),
+            int(getattr(f, "Scaling", 100) or 100),
+            float(getattr(f, "Position", 0.0) or 0.0),
+        )
+    except Exception:
+        return None
+
+def _snapshot_par(p):
+    """Return a tuple snapshot of key ParagraphFormat properties for idempotence checks."""
+    try:
+        tabs: list[tuple[float, int, int]] = []
+        try:
+            ts = getattr(p, "TabStops", None)
+            if ts is not None:
+                count = int(getattr(ts, "Count", 0) or 0)
+                for i in range(1, count + 1):
+                    try:
+                        stop = ts(i)
+                        pos = float(getattr(stop, "Position", 0.0) or 0.0)
+                        align = int(getattr(stop, "Alignment", 0) or 0)
+                        leader = int(getattr(stop, "Leader", 0) or 0)
+                        tabs.append((pos, align, leader))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        # Shading (background/foreground/texture)
+        shading = (
+            int(getattr(getattr(p, "Shading", None), "BackgroundPatternColor", -1) or -1),
+            int(getattr(getattr(p, "Shading", None), "ForegroundPatternColor", -1) or -1),
+            int(getattr(getattr(p, "Shading", None), "Texture", 0) or 0),
+        )
+        # Borders: capture enabled flag only (deep border state diff would be heavy)
+        try:
+            borders_enabled = bool(getattr(getattr(p, "Borders", None), "Enable", False))
+        except Exception:
+            borders_enabled = False
+        return (
+            int(getattr(p, "Alignment", 0) or 0),
+            int(getattr(p, "LineSpacingRule", 0) or 0),
+            float(getattr(p, "LineSpacing", 0.0) or 0.0),
+            float(getattr(p, "SpaceBefore", 0.0) or 0.0),
+            float(getattr(p, "SpaceAfter", 0.0) or 0.0),
+            float(getattr(p, "LeftIndent", 0.0) or 0.0),
+            float(getattr(p, "RightIndent", 0.0) or 0.0),
+            float(getattr(p, "FirstLineIndent", 0.0) or 0.0),
+            bool(getattr(p, "WidowControl", False)),
+            bool(getattr(p, "KeepWithNext", False)),
+            bool(getattr(p, "KeepTogether", False)),
+            int(getattr(p, "OutlineLevel", 0) or 0),
+            bool(getattr(p, "PageBreakBefore", False)),
+            bool(getattr(p, "NoLineNumber", False)),
+            bool(getattr(p, "Hyphenation", False)),
+            bool(getattr(p, "MirrorIndents", False)),
+            bool(getattr(p, "DisableLineHeightGrid", False)),
+            bool(getattr(p, "AutoAdjustRightIndent", False)),
+            float(getattr(p, "CharacterUnitLeftIndent", 0.0) or 0.0),
+            float(getattr(p, "CharacterUnitRightIndent", 0.0) or 0.0),
+            float(getattr(p, "CharacterUnitFirstLineIndent", 0.0) or 0.0),
+            tuple(tabs),
+            shading,
+            borders_enabled,
+        )
+    except Exception:
+        return None
+
+def clear_direct_formatting(rng, target: str = "all") -> bool:
+    """Clear direct formatting, returning True only if anything actually changed.
+
+    target: 'all' | 'font' | 'paragraph'
+    """
+    changed = False
+    try:
+        t = str(target).lower().strip() if target else "all"
+        font_before = _snapshot_font(getattr(rng, "Font", None)) if t in ("all", "font") else None
+        par_before = _snapshot_par(getattr(rng, "ParagraphFormat", None)) if t in ("all", "paragraph") else None
+        if t in ("all", "font"):
+            with suppress(Exception):
+                rng.Font.Reset()
+        if t in ("all", "paragraph"):
+            with suppress(Exception):
+                rng.ParagraphFormat.Reset()
+        font_after = _snapshot_font(getattr(rng, "Font", None)) if font_before is not None else None
+        par_after = _snapshot_par(getattr(rng, "ParagraphFormat", None)) if par_before is not None else None
+        if font_before is not None and font_after is not None and font_before != font_after:
+            changed = True
+        if par_before is not None and par_after is not None and par_before != par_after:
+            changed = True
     except Exception:
         pass
+    return changed
 
-
-def apply_to_scope(word, doc, scope: str, *, find_text: str = "", match_case: bool = False, whole_word: bool = False, max_matches: int = 0, fn=None) -> int:
+def apply_to_scope(word, doc, scope: str, *, find_text: str = "", match_case: bool = False, whole_word: bool = False, max_matches: int = 0, fn=None, on_applied=None) -> int:
     """Apply a function to ranges based on scope. Returns count applied."""
     applied = 0
     s = str(scope).strip().lower()
     try:
         if s == "document":
             if fn:
-                fn(doc.Content)
-                applied = 1
+                ok = fn(doc.Content)
+                if ok and on_applied:
+                    with suppress(Exception):
+                        on_applied(doc.Content)
+                applied = 1 if ok else 0
         elif s == "selection":
             sel = get_selection(word)
             if sel is None:
                 return 0
             if fn:
-                fn(sel.Range)
-                applied = 1
+                ok = fn(sel.Range)
+                if ok and on_applied:
+                    with suppress(Exception):
+                        on_applied(sel.Range)
+                applied = 1 if ok else 0
         elif s == "matches":
             if not find_text:
                 return 0
             for rng in iter_find_ranges(doc, find_text, match_case=match_case, whole_word=whole_word, max_matches=max_matches):
-                if fn:
-                    fn(rng)
+                if fn and fn(rng):
+                    if on_applied:
+                        with suppress(Exception):
+                            on_applied(rng)
                     applied += 1
         else:
             # default: document
             if fn:
-                fn(doc.Content)
-                applied = 1
+                ok = fn(doc.Content)
+                if ok and on_applied:
+                    with suppress(Exception):
+                        on_applied(doc.Content)
+                applied = 1 if ok else 0
+    except Exception:
+        pass
+    return applied
+
+
+def apply_to_scope_strict(word, doc, scope: str, *, find_text: str = "", match_case: bool = False, whole_word: bool = False, max_matches: int = 0, fn=None, on_applied=None) -> int:
+    """Apply a function to ranges based on scope with strict selection validation. Returns count applied."""
+    applied = 0
+    s = str(scope).strip().lower()
+    try:
+        if s == "document":
+            if fn:
+                ok = fn(doc.Content)
+                if ok and on_applied:
+                    with suppress(Exception):
+                        on_applied(doc.Content)
+                applied = 1 if ok else 0
+        elif s == "selection":
+            sel = get_selection(word)
+            if sel is None or sel.Range.Start == sel.Range.End:
+                raise ValueError("Selection scope requires an active text selection")
+            if fn:
+                ok = fn(sel.Range)
+                if ok and on_applied:
+                    with suppress(Exception):
+                        on_applied(sel.Range)
+                applied = 1 if ok else 0
+        elif s == "matches":
+            if not find_text:
+                return 0
+            for rng in iter_find_ranges(doc, find_text, match_case=match_case, whole_word=whole_word, max_matches=max_matches):
+                if fn and fn(rng):
+                    if on_applied:
+                        with suppress(Exception):
+                            on_applied(rng)
+                    applied += 1
+        else:
+            # default: document
+            if fn:
+                ok = fn(doc.Content)
+                if ok and on_applied:
+                    with suppress(Exception):
+                        on_applied(doc.Content)
+                applied = 1 if ok else 0
     except Exception:
         pass
     return applied

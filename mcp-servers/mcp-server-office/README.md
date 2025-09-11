@@ -4,6 +4,92 @@ This is a [Model Context Protocol](https://github.com/modelcontextprotocol) (MCP
 
 **Warning**: Be VERY careful with open Word or PowerPoint apps. Your content may be unexpectedly modified or deleted.
 
+## ✨ Enhanced Features
+
+This MCP server provides enhanced Word document manipulation capabilities with:
+
+### 🔧 **Enhanced `word.batch_format` Tool**
+- **Atomic Operations**: All-or-nothing execution with automatic rollback on failure
+- **Performance Limits**: Maximum 50 operations per call, 10,000 matches processed
+- **Comprehensive Validation**: 
+  - Font sizes: 1-1638 points
+  - Paragraph spacing: 0-1584 points
+  - Alignment: left, center, right, justify
+  - List types: bullet, numbered, none
+- **Enhanced Error Handling**: Specific validation errors with clear messages
+- **Superscript/Subscript Exclusion**: Prevents conflicting text formatting
+
+### 🎨 **Enhanced `word.highlight` Tool**  
+- **Unified API**: Single tool for both first and all highlighting
+- **Performance Limits**: Maximum 10,000 matches for optimal performance
+- **Enhanced Color Validation**: Supports CSS colors, hex codes, and Word constants
+- **Comprehensive Error Messages**: Clear guidance on supported formats
+
+### 🛡️ **Robust Error Handling**
+- **Validation Errors**: Parameter validation with specific ranges
+- **Performance Errors**: Clear limits to prevent server crashes  
+- **Execution Errors**: Document access and style existence validation
+- **Atomic Rollback**: Document restoration on operation failure
+
+### 📊 **Supported Operations**
+
+#### Font Formatting
+```json
+{
+  "font": {
+    "name": "Arial",
+    "size": 12,
+    "color": "#FF0000",
+    "bold": true,
+    "italic": false,
+    "underline": true,
+    "strikethrough": false,
+    "superscript": false,
+    "subscript": false
+  }
+}
+```
+
+#### Paragraph Formatting  
+```json
+{
+  "paragraph": {
+    "alignment": "center",
+    "line_spacing_rule": "single",
+    "space_before": 6,
+    "space_after": 6
+  }
+}
+```
+
+#### List Formatting
+```json
+{
+  "list": {
+    "type": "bullet"
+  }
+}
+```
+
+#### Style Application
+```json
+{
+  "style": {
+    "name": "Heading 1"
+  }
+}
+```
+
+### 🎯 **Scope Options**
+- **`document`**: Apply to entire document
+- **`selection`**: Apply to current selection (errors if no selection)
+- **`matches`**: Apply to text matches using find parameters
+
+### 🎨 **Color Formats**
+- **CSS Colors**: `"red"`, `"blue"`, `"yellow"`
+- **Hex Codes**: `"#FF0000"`, `"#0000FF"`
+- **Word Constants**: `16711680` (red), `255` (blue)
+
 ## Setup and Installation
 
 Simply run:
