@@ -537,3 +537,300 @@ def delete_comments_containing_text(doc, search_text: str, case_sensitive: bool 
         return deleted_count
     except Exception:
         return deleted_count
+
+
+# region Formatting helpers
+
+def _rgb_from_hex(color: str) -> int:
+    """Parse #RRGGBB to Word RGB int (r + g*256 + b*65536)."""
+    s = color.strip()
+    if s.startswith("#"):
+        s = s[1:]
+    if len(s) != 6:
+        raise ValueError("Invalid hex color")
+    r = int(s[0:2], 16)
+    g = int(s[2:4], 16)
+    b = int(s[4:6], 16)
+    return r + g * 256 + b * 65536
+
+
+_NAMED_COLORS = {
+    # common names
+    "black": _rgb_from_hex("#000000"),
+    "white": _rgb_from_hex("#ffffff"),
+    "red": _rgb_from_hex("#ff0000"),
+    "green": _rgb_from_hex("#008000"),
+    "blue": _rgb_from_hex("#0000ff"),
+    "yellow": _rgb_from_hex("#ffff00"),
+    "gray": _rgb_from_hex("#808080"),
+    "grey": _rgb_from_hex("#808080"),
+    "lightgray": _rgb_from_hex("#d3d3d3"),
+    "lightgrey": _rgb_from_hex("#d3d3d3"),
+    "darkgray": _rgb_from_hex("#a9a9a9"),
+    "darkgrey": _rgb_from_hex("#a9a9a9"),
+}
+
+
+def parse_font_color(color: str | int | None) -> int | None:
+    """Resolve a color value for Word Font.Color.
+
+    Accepts:
+      - None: no change
+      - int: pass-through
+      - named color string
+      - #RRGGBB
+    """
+    if color is None:
+        return None
+    if isinstance(color, int):
+        return int(color)
+    s = str(color).strip()
+    if not s:
+        return None
+    if s.startswith("#"):
+        try:
+            return _rgb_from_hex(s)
+        except Exception:
+            return None
+    return _NAMED_COLORS.get(s.lower(), None)
+
+
+def get_selection(word):
+    """Return the Application.Selection if available, else None."""
+    try:
+        sel = word.Selection
+        # Some situations can have no selection object; ensure it has a Range
+        _ = sel.Range  # may raise
+        return sel
+    except Exception:
+        return None
+
+
+def iter_find_ranges(doc, find_text: str, *, match_case: bool = False, whole_word: bool = False, max_matches: int = 0):
+    """Yield non-overlapping ranges that match find_text in the document, forward-only."""
+    if not find_text:
+        return
+    rng = doc.Content
+    rng.Find.ClearFormatting()
+    flags = {
+        "FindText": find_text,
+        "MatchCase": match_case,
+        "MatchWholeWord": whole_word,
+        "Wrap": 0,  # wdFindStop
+        "Forward": True,
+    }
+    count = 0
+    found = rng.Find.Execute(**flags)
+    while found:
+        current_end = rng.End
+        yield rng.Duplicate
+        count += 1
+        if max_matches and count >= max_matches:
+            break
+        start_pos = current_end
+        if start_pos >= doc.Content.End:
+            break
+        rng = doc.Range(start_pos, doc.Content.End)
+        rng.Find.ClearFormatting()
+        found = rng.Find.Execute(**flags)
+        if found and rng.End <= current_end:
+            break
+
+
+def set_range_font(rng, *, name: str | None = None, size: float | int | None = None, color: int | None = None, bold: bool | None = None, italic: bool | None = None, underline: bool | None = None) -> None:
+    """Apply character-level formatting to a range, if options provided."""
+    try:
+        f = rng.Font
+        if name:
+            f.Name = name
+        if size is not None:
+            try:
+                f.Size = float(size)
+            except Exception:
+                pass
+        if color is not None:
+            try:
+                f.Color = int(color)
+            except Exception:
+                pass
+        if bold is not None:
+            f.Bold = bool(bold)
+        if italic is not None:
+            f.Italic = bool(italic)
+        if underline is not None:
+            f.Underline = 1 if underline else 0  # wdUnderlineSingle=1, wdUnderlineNone=0
+    except Exception:
+        pass
+
+
+_ALIGN_MAP = {
+    "left": 0,  # wdAlignParagraphLeft
+    "center": 1,  # wdAlignParagraphCenter
+    "right": 2,  # wdAlignParagraphRight
+    "justify": 3,  # wdAlignParagraphJustify
+}
+
+_LINE_SPACING_RULE = {
+    "single": (0, 0.0),  # (rule, pt)
+    "onepointfive": (1, 0.0),
+    "1.5": (1, 0.0),
+    "double": (2, 0.0),
+}
+
+
+def _parse_line_spacing(value: str) -> tuple[int, float] | None:
+    if not value:
+        return None
+    s = value.strip().lower()
+    if s in _LINE_SPACING_RULE:
+        return _LINE_SPACING_RULE[s]
+    # exact:14 or atleast:12
+    if s.startswith("exact:"):
+        try:
+            pt = float(s.split(":", 1)[1])
+            return (4, pt)  # wdLineSpaceExactly
+        except Exception:
+            return None
+    if s.startswith("atleast:"):
+        try:
+            pt = float(s.split(":", 1)[1])
+            return (3, pt)  # wdLineSpaceAtLeast
+        except Exception:
+            return None
+    return None
+
+
+def set_range_paragraph(rng, *, alignment: str | None = None, line_spacing: str | None = None, space_before: float | int | None = None, space_after: float | int | None = None) -> None:
+    try:
+        p = rng.ParagraphFormat
+        if alignment:
+            val = _ALIGN_MAP.get(str(alignment).lower())
+            if val is not None:
+                p.Alignment = val
+        if line_spacing:
+            res = _parse_line_spacing(line_spacing)
+            if res:
+                rule, pt = res
+                p.LineSpacingRule = rule
+                if pt:
+                    p.LineSpacing = pt
+        if space_before is not None:
+            try:
+                p.SpaceBefore = float(space_before)
+            except Exception:
+                pass
+        if space_after is not None:
+            try:
+                p.SpaceAfter = float(space_after)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def apply_list_format(rng, list_type: str) -> None:
+    try:
+        lf = rng.ListFormat
+        t = str(list_type).lower()
+        if t == "bullet":
+            lf.ApplyBulletDefault()
+        elif t == "numbered":
+            lf.ApplyNumberDefault()
+        elif t == "none":
+            # Best-effort remove any list formatting
+            with suppress(Exception):
+                lf.RemoveNumbers()
+            with suppress(Exception):
+                lf.RemoveBullets()
+    except Exception:
+        pass
+
+
+def apply_style_to_range(rng, style_name: str) -> bool:
+    try:
+        para = rng.Paragraphs
+        if para is not None and para.Count > 0:
+            para(1).Style = style_name
+            return True
+    except Exception:
+        try:
+            rng.Style = style_name
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def update_normal_style(doc, *, name: str | None = None, size: float | int | None = None, color: int | None = None, bold: bool | None = None, italic: bool | None = None, underline: bool | None = None) -> bool:
+    try:
+        styles = doc.Styles
+        normal = styles("Normal")
+        f = normal.Font
+        if name:
+            f.Name = name
+        if size is not None:
+            try:
+                f.Size = float(size)
+            except Exception:
+                pass
+        if color is not None:
+            try:
+                f.Color = int(color)
+            except Exception:
+                pass
+        if bold is not None:
+            f.Bold = bool(bold)
+        if italic is not None:
+            f.Italic = bool(italic)
+        if underline is not None:
+            f.Underline = 1 if underline else 0
+        return True
+    except Exception:
+        return False
+
+
+def clear_direct_formatting(rng) -> None:
+    """Clear direct font & paragraph formatting (keep styles)."""
+    try:
+        with suppress(Exception):
+            rng.Font.Reset()
+        with suppress(Exception):
+            rng.ParagraphFormat.Reset()
+    except Exception:
+        pass
+
+
+def apply_to_scope(word, doc, scope: str, *, find_text: str = "", match_case: bool = False, whole_word: bool = False, max_matches: int = 0, fn=None) -> int:
+    """Apply a function to ranges based on scope. Returns count applied."""
+    applied = 0
+    s = str(scope).strip().lower()
+    try:
+        if s == "document":
+            if fn:
+                fn(doc.Content)
+                applied = 1
+        elif s == "selection":
+            sel = get_selection(word)
+            if sel is None:
+                return 0
+            if fn:
+                fn(sel.Range)
+                applied = 1
+        elif s == "matches":
+            if not find_text:
+                return 0
+            for rng in iter_find_ranges(doc, find_text, match_case=match_case, whole_word=whole_word, max_matches=max_matches):
+                if fn:
+                    fn(rng)
+                    applied += 1
+        else:
+            # default: document
+            if fn:
+                fn(doc.Content)
+                applied = 1
+    except Exception:
+        pass
+    return applied
+
+
+# endregion

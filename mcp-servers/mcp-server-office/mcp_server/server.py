@@ -18,6 +18,14 @@ from mcp_server.app_interaction.word_editor import (
     get_active_document,
     get_markdown_representation,
     get_word_app,
+    parse_font_color,
+    set_range_font,
+    set_range_paragraph,
+    apply_list_format,
+    apply_style_to_range,
+    update_normal_style,
+    apply_to_scope,
+    clear_direct_formatting as clear_direct_fmt,
 )
 from mcp_server.markdown_edit.comment_analysis import run_comment_analysis
 from mcp_server.markdown_edit.feedback_step import run_feedback_step
@@ -743,6 +751,797 @@ def create_mcp_server() -> FastMCP:
                 return f"Replaced {count} {scope} occurrence(s)"
         except Exception as e:
             return f"ERROR: search_and_replace failed: {e}"
+
+    # region New deterministic formatting tools
+
+    @mcp.tool()
+    async def set_document_base_font(
+        name: str = "",
+        size: float | int | None = None,
+        color: str = "",
+        bold: bool | None = None,
+        italic: bool | None = None,
+        underline: bool | None = None,
+        path: str = "",
+    ) -> str:
+        """Update the Normal style (base font) in a Word document.
+
+        Any provided property will be updated. If none are provided, it's a no-op.
+        """
+        try:
+            has_change = any([
+                bool(name.strip()),
+                size is not None,
+                bool(color.strip()),
+                bold is not None,
+                italic is not None,
+                underline is not None,
+            ])
+            if not has_change:
+                return "No changes requested"
+
+            color_val = parse_font_color(color) if color else None
+
+            if path:
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+                    ok = update_normal_style(
+                        target,
+                        name=name.strip() or None,
+                        size=size,
+                        color=color_val,
+                        bold=bold,
+                        italic=italic,
+                        underline=underline,
+                    )
+                    if ok:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return ok
+
+                async def _task_base_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                updated = await with_doc_lock(canonical_doc_key(str(p)), _task_base_path)
+                return "Updated Normal style" if updated else "Failed to update Normal style"
+            else:
+                import asyncio
+
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return -1
+                    if word.Documents.Count > 1:
+                        return -2
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return -3
+                    except Exception:
+                        pass
+                    ok = update_normal_style(
+                        doc,
+                        name=name.strip() or None,
+                        size=size,
+                        color=color_val,
+                        bold=bold,
+                        italic=italic,
+                        underline=underline,
+                    )
+                    return 1 if ok else 0
+
+                async def _task_base_active():
+                    return await asyncio.to_thread(_do_active)
+
+                res = await with_global_lock(_task_base_active)
+                if res == -1:
+                    return "ERROR: No document is open. Provide 'path' or open one."
+                if res == -2:
+                    return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                if res == -3:
+                    return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
+                return "Updated Normal style" if res == 1 else "Failed to update Normal style"
+        except Exception as e:
+            return f"ERROR: set_document_base_font failed: {e}"
+
+    @mcp.tool()
+    async def set_font(
+        scope: str = "document",
+        name: str = "",
+        size: float | int | None = None,
+        color: str = "",
+        bold: bool | None = None,
+        italic: bool | None = None,
+        underline: bool | None = None,
+        find: str = "",
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        max_matches: int = 0,
+        path: str = "",
+    ) -> str:
+        """Apply character formatting deterministically to a scope (document/selection/matches)."""
+        try:
+            has_change = any([
+                bool(name.strip()),
+                size is not None,
+                bool(color.strip()),
+                bold is not None,
+                italic is not None,
+                underline is not None,
+            ])
+            if not has_change:
+                return "No changes requested"
+
+            color_val = parse_font_color(color) if color else None
+
+            if path:
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+
+                    def _apply(rng):
+                        set_range_font(
+                            rng,
+                            name=name.strip() or None,
+                            size=size,
+                            color=color_val,
+                            bold=bold,
+                            italic=italic,
+                            underline=underline,
+                        )
+
+                    applied = apply_to_scope(
+                        word,
+                        target,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    if applied:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return applied
+
+                async def _task_setfont_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_setfont_path)
+            else:
+                import asyncio
+
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return -1
+                    if word.Documents.Count > 1:
+                        return -2
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return -3
+                    except Exception:
+                        pass
+
+                    def _apply(rng):
+                        set_range_font(
+                            rng,
+                            name=name.strip() or None,
+                            size=size,
+                            color=color_val,
+                            bold=bold,
+                            italic=italic,
+                            underline=underline,
+                        )
+
+                    applied = apply_to_scope(
+                        word,
+                        doc,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    return applied
+
+                async def _task_setfont_active():
+                    return await asyncio.to_thread(_do_active)
+
+                applied = await with_global_lock(_task_setfont_active)
+                if applied == -1:
+                    return "ERROR: No document is open. Provide 'path' or open one."
+                if applied == -2:
+                    return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                if applied == -3:
+                    return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
+            return ("Applied formatting to document" if applied == 1 and scope != "matches" else f"Applied formatting to {applied} target(s)") if applied else "No targets found"
+        except Exception as e:
+            return f"ERROR: set_font failed: {e}"
+
+    @mcp.tool()
+    async def set_paragraph_format(
+        scope: str = "document",
+        alignment: str = "",
+        line_spacing: str = "",
+        space_before: float | int | None = None,
+        space_after: float | int | None = None,
+        find: str = "",
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        max_matches: int = 0,
+        path: str = "",
+    ) -> str:
+        """Apply paragraph alignment/spacing to a scope deterministically."""
+        try:
+            has_change = any([
+                bool(alignment.strip()),
+                bool(line_spacing.strip()),
+                space_before is not None,
+                space_after is not None,
+            ])
+            if not has_change:
+                return "No changes requested"
+
+            if path:
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+
+                    def _apply(rng):
+                        set_range_paragraph(
+                            rng,
+                            alignment=alignment.strip() or None,
+                            line_spacing=line_spacing.strip() or None,
+                            space_before=space_before,
+                            space_after=space_after,
+                        )
+
+                    applied = apply_to_scope(
+                        word,
+                        target,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    if applied:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return applied
+
+                async def _task_setpara_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_setpara_path)
+            else:
+                import asyncio
+
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return -1
+                    if word.Documents.Count > 1:
+                        return -2
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return -3
+                    except Exception:
+                        pass
+
+                    def _apply(rng):
+                        set_range_paragraph(
+                            rng,
+                            alignment=alignment.strip() or None,
+                            line_spacing=line_spacing.strip() or None,
+                            space_before=space_before,
+                            space_after=space_after,
+                        )
+
+                    applied = apply_to_scope(
+                        word,
+                        doc,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    return applied
+
+                async def _task_setpara_active():
+                    return await asyncio.to_thread(_do_active)
+
+                applied = await with_global_lock(_task_setpara_active)
+                if applied == -1:
+                    return "ERROR: No document is open. Provide 'path' or open one."
+                if applied == -2:
+                    return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                if applied == -3:
+                    return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
+            return ("Applied paragraph formatting to document" if applied == 1 and scope != "matches" else f"Applied paragraph formatting to {applied} target(s)") if applied else "No targets found"
+        except Exception as e:
+            return f"ERROR: set_paragraph_format failed: {e}"
+
+    @mcp.tool()
+    async def set_list_style(
+        scope: str = "selection",
+        type: str = "bullet",
+        find: str = "",
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        max_matches: int = 0,
+        path: str = "",
+    ) -> str:
+        """Apply or remove list formatting (bullet/numbered/none) on the scope."""
+        try:
+            lt = type.strip().lower()
+            if lt not in ("bullet", "numbered", "none"):
+                return "ERROR: Invalid list type. Use 'bullet', 'numbered', or 'none'."
+
+            if path:
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+
+                    def _apply(rng):
+                        apply_list_format(rng, lt)
+
+                    applied = apply_to_scope(
+                        word,
+                        target,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    if applied:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return applied
+
+                async def _task_setlist_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_setlist_path)
+            else:
+                import asyncio
+
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return -1
+                    if word.Documents.Count > 1:
+                        return -2
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return -3
+                    except Exception:
+                        pass
+
+                    def _apply(rng):
+                        apply_list_format(rng, lt)
+
+                    applied = apply_to_scope(
+                        word,
+                        doc,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    return applied
+
+                async def _task_setlist_active():
+                    return await asyncio.to_thread(_do_active)
+
+                applied = await with_global_lock(_task_setlist_active)
+                if applied == -1:
+                    return "ERROR: No document is open. Provide 'path' or open one."
+                if applied == -2:
+                    return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                if applied == -3:
+                    return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
+            return ("Applied list formatting to document" if applied == 1 and scope != "matches" else f"Applied list formatting to {applied} target(s)") if applied else "No targets found"
+        except Exception as e:
+            return f"ERROR: set_list_style failed: {e}"
+
+    @mcp.tool()
+    async def apply_style(
+        scope: str = "selection",
+        style_name: str = "",
+        find: str = "",
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        max_matches: int = 0,
+        path: str = "",
+    ) -> str:
+        """Apply a built-in style (e.g., 'Normal', 'Heading 1') to the scope."""
+        try:
+            if not style_name.strip():
+                return "ERROR: style_name is required"
+
+            if path:
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+
+                    applied = 0
+
+                    def _apply(rng):
+                        nonlocal applied
+                        if apply_style_to_range(rng, style_name):
+                            applied += 1
+
+                    # Use selection/document/matches
+                    _ = apply_to_scope(
+                        word,
+                        target,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    if applied:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return applied
+
+                async def _task_applystyle_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_applystyle_path)
+            else:
+                import asyncio
+
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return -1
+                    if word.Documents.Count > 1:
+                        return -2
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return -3
+                    except Exception:
+                        pass
+                    applied = 0
+
+                    def _apply(rng):
+                        nonlocal applied
+                        if apply_style_to_range(rng, style_name):
+                            applied += 1
+
+                    _ = apply_to_scope(
+                        word,
+                        doc,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    return applied
+
+                async def _task_applystyle_active():
+                    return await asyncio.to_thread(_do_active)
+
+                applied = await with_global_lock(_task_applystyle_active)
+                if applied == -1:
+                    return "ERROR: No document is open. Provide 'path' or open one."
+                if applied == -2:
+                    return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                if applied == -3:
+                    return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
+            return ("Applied style to document" if applied == 1 and scope != "matches" else f"Applied style to {applied} target(s)") if applied else "No targets found"
+        except Exception as e:
+            return f"ERROR: apply_style failed: {e}"
+
+    @mcp.tool()
+    async def clear_direct_formatting(
+        scope: str = "document",
+        find: str = "",
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        max_matches: int = 0,
+        path: str = "",
+    ) -> str:
+        """Clear direct character and paragraph formatting on the scope (retains styles)."""
+        try:
+            if path:
+                from mcp_server.path_utils import resolve_user_path
+                p = resolve_user_path(path)
+                if not p.is_file():
+                    return f"ERROR: File not found: {p}"
+
+                def _do_on_worker(word):
+                    _prepare_file_for_edit(p)
+                    target = None
+                    for i in range(1, word.Documents.Count + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(p), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(p))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+
+                    def _apply(rng):
+                        clear_direct_fmt(rng)
+
+                    applied = apply_to_scope(
+                        word,
+                        target,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    if applied:
+                        try:
+                            target.Save()
+                        except Exception:
+                            pass
+                    if AUTO_CLOSE:
+                        try:
+                            target.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                    return applied
+
+                async def _task_clearfmt_path():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+                applied = await with_doc_lock(canonical_doc_key(str(p)), _task_clearfmt_path)
+            else:
+                import asyncio
+
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    word = get_word_app()
+                    if word.Documents.Count == 0:
+                        return -1
+                    if word.Documents.Count > 1:
+                        return -2
+                    doc = get_active_document(word)
+                    try:
+                        if getattr(doc, "ReadOnly", False):
+                            return -3
+                    except Exception:
+                        pass
+
+                    def _apply(rng):
+                        clear_direct_fmt(rng)
+
+                    applied = apply_to_scope(
+                        word,
+                        doc,
+                        scope,
+                        find_text=find,
+                        match_case=case_sensitive,
+                        whole_word=whole_word,
+                        max_matches=max_matches,
+                        fn=_apply,
+                    )
+                    return applied
+
+                async def _task_clearfmt_active():
+                    return await asyncio.to_thread(_do_active)
+
+                applied = await with_global_lock(_task_clearfmt_active)
+                if applied == -1:
+                    return "ERROR: No document is open. Provide 'path' or open one."
+                if applied == -2:
+                    return "ERROR: Multiple documents are open. Provide 'path' to target the right file."
+                if applied == -3:
+                    return "ERROR: Active document is read-only. Provide 'path' to edit a writable copy."
+            return ("Cleared direct formatting on document" if applied == 1 and scope != "matches" else f"Cleared direct formatting on {applied} target(s)") if applied else "No targets found"
+        except Exception as e:
+            return f"ERROR: clear_direct_formatting failed: {e}"
+
+    # endregion
 
     @mcp.tool()
     async def get_powerpoint_content() -> str:

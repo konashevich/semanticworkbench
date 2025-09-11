@@ -1,6 +1,9 @@
 # Private settings
 **/certs/*.pem
 **/certs/config.json
+# Private settings
+**/certs/*.pem
+**/certs/config.json
 **/certs/mkcert
 .env
 *.local
@@ -13,17 +16,24 @@ appsettings.*.json
 .working
 
 # Dependencies and build cache
-node_modules
-.venv
-__pycache__
-.pytest_cache
-.ruff_cache
-.cache
+node_modules/
+# Virtualenvs / Python env folders (ignore any .venv anywhere)
+.venv/
+.venv312
+**/.venv312/
+**/.venv/
+venv/
+env/
+ENV/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.cache/
 *.egg-info
-bin
-obj
-dist
-build
+bin/
+obj/
+dist/
+build/
 
 # Logs
 *.log
@@ -33,7 +43,15 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-#azd files
+# azd files
 .azure
 azure.yaml
 next-steps.md
+examples/python/smoke_word_formatting.py
+mcp-servers/mcp-server-office/README.md
+mcp-servers/mcp-server-office/README.md
+mcp-servers/mcp-server-office/.venv312/pyvenv.cfg
+mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/__init__.py
+mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/__main__.py
+mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/__pip-runner__.py
+mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/py.typed
