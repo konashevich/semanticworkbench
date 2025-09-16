@@ -1,3 +1,272 @@
+# Office MCP Document Representation & Interaction Plan
+
+Purpose: Enable AI agents to flexibly access, navigate, and modify Word document content with progressively richer formatting fidelity while minimizing noise, token overhead, and synchronization errors.
+
+## Guiding Principles
+1. Progressive disclosure: lightweight first, richer only on demand.
+2. Stable identities for safe edits (optimistic concurrency).
+3. High information density per token (avoid raw XML/HTML spam by default).
+4. Opt-in fallbacks (raw OOXML) for edge diagnostics.
+5. Stateless-friendly, but enable caching & incremental refresh.
+6. Clear separation: content vs formatting vs structure vs analytics.
+
+## Representation Tiers (Baseline)
+- `markdown` (current) – minimal structural/text view.
+- `styled_json` (new) – whole-document normalized semantic formatting (loss-minimized, noise reduced).
+- `ooxml_raw` (optional) – exact WordprocessingML snapshot (never default).
+
+---
+## Phase 0 – Foundations & Decisions
+**Goals**: Confirm scope, naming, extension points.
+**Deliverables**:
+- This plan (`plan.md`).
+- Enumeration of tool names & parameter conventions.
+**Acceptance**: Plan reviewed & frozen for Phase 1.
+
+---
+## Phase 1 – Block Identity & Metadata Layer
+**Goals**: Provide stable identifiers for paragraphs, tables, headers/footers.
+**Additions**:
+- Extraction adds for each block:
+  - `block_id` (synthetic: e.g., `b::<scope>::<section>::<seq>`)
+  - `para_id` (if available from OOXML `w14:paraId`)
+  - `seq_index` (0-based order inside scope)
+  - `char_range` (start,end snapshot offsets in concatenated scope text)
+  - `content_hash` (SHA1 of canonicalized text + style_name)
+- Document version object: `{file_path, last_modified, size_bytes, version_hash}`.
+**Tools**:
+- `get_document_overview()` -> counts & version.
+**Acceptance**:
+- IDs persist across read-only operations.
+- Hash mismatch detectable after edit.
+**Risks**: paraId absence; mitigated with multi-key fallback.
+
+---
+## Phase 2 – Headings & Structural Index
+**Goals**: Fast navigation of outline.
+**Tools**:
+- `list_headings()` -> ordered heading array `{block_id, level, text, path}`.
+- `get_heading_tree()` (optional) -> nested structure.
+**Acceptance**:
+- Correct ordering vs visual doc order.
+- Excludes TOC field-generated paragraphs unless `include_toc=true`.
+**Risks**: Misclassification of custom styles; mitigation: configurable heading style map.
+
+---
+## Phase 3 – Styled JSON Full Export
+**Goals**: Whole document in normalized JSON.
+**Normalization Rules**:
+- Merge adjacent runs with identical effective formatting.
+- Resolve style inheritance (paragraph + character + defaults).
+- Inline effective attributes only if non-default: bold, italic, underline, strike, superscript, subscript, font_family, font_size_pt, color_rgb, highlight_rgb, alignment, list marker, heading_level.
+- Represent tables: hierarchy `table -> rows -> cells -> blocks` with cell spans.
+- Represent headers & footers with `section_index`, `type` (primary|first|even).
+**API**:
+- `open_word_document(format=styled_json, include_headers_footers=true|false, include_tables=true|false, max_blocks?, cursor?)`.
+**Acceptance**:
+- Output size < 25% of raw OOXML token estimate (target metric baseline example doc).
+- No duplicate adjacent formatting entries.
+**Risks**: Performance on large docs; mitigation: pagination (cursor + block window).
+
+---
+## Phase 4 – Raw OOXML Opt-In
+**Goals**: Diagnostic fallback.
+**API**:
+- `open_word_document(format=ooxml_raw, scope=body|all)`.
+**Protections**:
+- Size guard: reject if > threshold unless `force=true`.
+**Acceptance**:
+- Exact WordOpenXML match (hash compare) to internal retrieval.
+**Risks**: Token blow-up; mitigated by gate + warning banner in response.
+
+---
+## Phase 5 – Partial Fetch / Drill-Down Tools
+**Goals**: Avoid full export when only subsets needed.
+**Tools**:
+- `get_blocks(block_ids[])` -> styled JSON subset.
+- `get_paragraph(block_id)` (alias convenience).
+- `get_table(table_block_id)` -> table subtree.
+- `get_header_footer(section_index, type)`.
+**Acceptance**:
+- Latency improvement vs full export for small requests.
+**Risks**: Inconsistent pagination; unify through shared resolver.
+
+---
+## Phase 6 – Editing & Optimistic Concurrency
+**Goals**: Safe formatting/content edits via IDs.
+**Tools**:
+- `apply_paragraph_format(block_id, expected_hash, changes)`.
+- `replace_text(block_id, expected_hash, new_text)`.
+- `bulk_edit(edits[])` batch variant.
+**Behavior**:
+- Reject with `conflict` if hash mismatch or block not found.
+- Return new hash + minimal diff summary.
+**Acceptance**:
+- Edit does not corrupt adjacent formatting; verified by hash shift only for target block.
+**Risks**: Word COM race; mitigation: lock per document during mutation.
+
+---
+## Phase 7 – Semantic Search & Lightweight RAG
+**Goals**: Retrieval without sending all text.
+**Pipeline**:
+- Chunk = paragraph or merged paragraphs < token limit.
+- Embed on first structured export or explicit `build_index()`.
+- In-memory vector store (e.g., NumPy + cosine or optional FAISS) keyed by `block_id`.
+**Tools**:
+- `semantic_search(query, top_k=5, filters?)` returns `{block_id, score, snippet}`.
+- `reindex_document()` to rebuild after edits (or incremental update per edit).
+**Acceptance**:
+- Queries return relevant headings/content in test cases.
+**Risks**: Model drift; allow embedding model name in index metadata.
+
+---
+## Phase 8 – Annotated Markdown Mode (Optional)
+**Goals**: Human + model-friendly middle representation.
+**Format**:
+```
+[H1 size=16 color=#2F5496]Executive Summary[/]
+1. Objectives
+```
+- Only non-default attributes included.
+**API**: `open_word_document(format=annotated_markdown, ...)`.
+**Acceptance**: Round-trip readability; size << styled_json.
+**Risks**: Parser ambiguity; define strict tag grammar.
+
+---
+## Phase 9 – Analytics & Summaries
+**Goals**: Derived insights to reduce raw data transfer.
+**Tools**:
+- `style_usage()` -> counts by style.
+- `heading_outline_summary()` -> tree + word counts.
+- `list_statistics()` -> max depth, item counts.
+**Acceptance**: Correct counts vs ground truth sample docs.
+**Risks**: Drift after edits; refresh on demand.
+
+---
+## Phase 10 – Performance & Pagination Enhancements
+**Goals**: Scale to large documents (> 500 pages).
+**Features**:
+- Streaming cursors for `styled_json` (windowed `block_start`, `limit`).
+- Background prefetch / cache warming.
+- Token size estimator (`estimate_tokens(format, options)` tool).
+**Acceptance**: Large doc operations under target latency thresholds.
+**Risks**: Memory growth; implement LRU eviction.
+
+---
+## Phase 11 – Advanced Features (Deferred)
+- Revisions mode (include / exclude / diff summarization).
+- Field code parsing (TOC, REF, PAGE) annotation.
+- Inline comment extraction & resolution tools.
+- Layout metrics (page number, column position) if needed.
+
+---
+## Phase 12 – Telemetry & Quality
+**Metrics**:
+- Avg blocks per export, styled_json size vs markdown ratio.
+- Semantic search latency.
+- Edit conflict rate.
+- Cache hit ratio (identity + embeddings).
+**Logging**: Structured (operation, duration_ms, doc_version).
+**Acceptance**: Dash or log queries produce actionable stats.
+
+---
+## Phase 13 – Security & Safety
+- Path allowlist / sandbox for opening docs.
+- Size limits & guardrails for OOXML and raw exports.
+- Redaction hook (optional) to mask sensitive patterns before returning.
+- Avoid base64 docx to model unless explicitly requested.
+
+---
+## Phase 14 – Rollout Strategy
+1. Ship Phase 1–2 (read-only nav) behind feature flag.
+2. Gather usage metrics (which tools called most).
+3. Release Phase 3 export + Phase 5 partial fetch.
+4. Add edits (Phase 6) after stability burn-in.
+5. Introduce semantic search (Phase 7) once content flows proven stable.
+6. Iterate optional modes (Annotated, Analytics) based on demand.
+
+---
+## Data Structures (Sketch)
+Block (common):
+```
+{
+  "block_id": "b::body::1::37",
+  "para_id": "00AF12BC",        // optional
+  "seq_index": 37,
+  "type": "paragraph" | "list_item" | "table" | "table_row" | "table_cell" | "header" | "footer",
+  "text": "...",                 // paragraphs/list items
+  "heading_level": 1,             // if heading
+  "list": {"kind":"number","level":0,"marker":"1."},
+  "format": {"bold":true,"font_size_pt":16,"color_rgb":"#2F5496"},
+  "content_hash": "sha1:..."
+}
+```
+
+Document version:
+```
+{"file_path":"C:/.../doc.docx","last_modified":"2025-09-11T10:20:30Z","size_bytes":123456,"version_hash":"sha1:..."}
+```
+
+---
+## Conflict Handling Flow (Example)
+1. Client fetches block with `content_hash=H1`.
+2. Client sends edit referencing `block_id`, `expected_hash=H1`.
+3. Server recomputes hash → H1? apply & return new hash H2; else conflict.
+4. On conflict: client re-fetches block, re-applies intent.
+
+---
+## Minimal Initial Tool List (after Phase 3)
+- `open_word_document` (formats: markdown|styled_json|ooxml_raw)
+- `get_document_overview`
+- `list_headings`
+- `get_blocks`
+- (Phase 6) `replace_text`, `apply_paragraph_format`
+- (Phase 7) `semantic_search`
+
+---
+## Open Questions (Track & Resolve)
+1. Heading style map customization source (config file? tool param?).
+2. Embedding model selection & pluggability.
+3. Field code inclusion policy.
+4. Revisions default mode (exclude vs collapsed summary?).
+5. Memory limit thresholds for cache eviction.
+
+---
+## Success Metrics
+- 80% of model formatting queries answerable with `styled_json` subset or derived tools without OOXML dump.
+- Styled JSON median size < 30% of OOXML tokens across sample corpus.
+- <5% edit requests result in conflict retries under normal collaborative usage.
+- Semantic search p95 latency < 150 ms (medium docs ~2k blocks, local embeddings cached).
+
+---
+## Deferred / Nice-to-Have Later
+- Page layout extraction (coordinates, page numbers).
+- Image OCR integration.
+- Style diffing between document versions.
+- Cross-document semantic linking.
+
+---
+## Implementation Order Summary
+0. Plan
+1. Identity + overview
+2. Headings index
+3. Styled JSON export + pagination
+4. OOXML opt-in
+5. Partial fetch tools
+6. Editing (text + formatting)
+7. Semantic search index
+8. Annotated markdown (optional)
+9. Analytics summaries
+10. Performance/pagination tuning
+11. Advanced (revisions, fields, comments)
+12. Telemetry & security hardening
+13. Rollout & iteration
+
+---
+## Notes
+- Keep backward compatibility: default format remains markdown until stable.
+- Avoid premature micro-optimizations; measure after Phase 3.
+- Provide clear user-facing warnings when returning raw OOXML.
 # Office MCP - Formatting and Tool Surface Plan - IMPLEMENTED
 
 ✅ **IMPLEMENTATION COMPLETE** - This plan has been successfully implemented with enhancements.
