@@ -19,6 +19,7 @@ appsettings.*.json
 node_modules/
 # Virtualenvs / Python env folders (ignore any .venv anywhere)
 .venv/
+.venv_shared
 .venv312
 **/.venv312/
 **/.venv/
@@ -55,4 +56,6 @@ mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/__init__.py
 mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/__main__.py
 mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/__pip-runner__.py
 mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/py.typed
-mcp-servers/mcp-server-office-prod/
+# keep server folders but ignore virtualenvs inside them
+mcp-servers/mcp-server-office/.venv*/
+mcp-servers/mcp-server-office-prod/.venv*/

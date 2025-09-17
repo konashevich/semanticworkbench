@@ -1,0 +1,45 @@
+{
+  "servers": {
+    "office": {
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "mcp-servers\\mcp-server-office-prod\\run_shared_venv.ps1",
+        "--transport",
+        "stdio"
+      ],
+      "cwd": "c:\\Users\\akona\\OneDrive\\Dev\\Word MCP\\semanticworkbench\\mcp-servers\\mcp-server-office-prod",
+      "env": {
+        "MCP_WORD_POOL_SIZE": "3",
+        "MCP_WORD_VISIBLE": "0",
+        "MCP_WORD_AUTO_CLOSE": "1",
+        "MCP_WORD_OP_TIMEOUT": "90"
+      },
+      "type": "stdio"
+    },
+    "officeDev": {
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "mcp-servers\\mcp-server-office\\run_shared_venv.ps1",
+        "--transport",
+        "stdio"
+      ],
+      "cwd": "c:\\Users\\akona\\OneDrive\\Dev\\Word MCP\\semanticworkbench\\mcp-servers\\mcp-server-office",
+      "env": {
+        "MCP_WORD_POOL_SIZE": "3",
+        "MCP_WORD_VISIBLE": "0",
+        "MCP_WORD_AUTO_CLOSE": "1",
+        "MCP_WORD_OP_TIMEOUT": "90"
+      },
+      "type": "stdio"
+    }
+  },
+  "inputs": []
+}
