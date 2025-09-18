@@ -6,9 +6,101 @@ This is a [Model Context Protocol](https://github.com/modelcontextprotocol) (MCP
 
 ## ✨ Enhanced Features
 
-This MCP server provides enhanced Word document manipulation capabilities with:
+This MCP server provides comprehensive Office application manipulation with:
 
-### 🔧 **Enhanced `word.batch_format` Tool**
+### 📊 **PowerPoint Tools - NEW!**
+Complete PowerPoint automation with precision coordinate placement for OCR reconstruction workflows:
+
+#### **🎯 Presentation Management**
+- **`ppt_create_presentation(a4_portrait=True, close_existing=False)`**: Create new presentation with A4 sizing
+- **`ppt_set_slide_size(width, height)`**: Custom slide dimensions with unit support
+- **`ppt_add_slide(position=None, layout="blank")`**: Insert slides at specific positions
+- **`ppt_get_content()`**: Extract all slide content for analysis
+
+#### **📝 Precise Text Box Placement**  
+- **`ppt_add_text_box(slide_index, left, top, width, height, text, font?, paragraph?)`**: Add text at exact coordinates
+- **`ppt_update_text_box(slide_index, shape_id, text?, font?, paragraph?)`**: Update existing text boxes
+- **Full Word Formatting Parity**: name, size, color, bold, italic, underline, strikethrough, superscript, subscript
+- **Advanced Paragraph Controls**: alignment, line_spacing, space_before, space_after, bullets, indentation
+
+#### **🖼️ Enhanced Image Handling**
+- **`ppt_add_image(slide_index, path, left, top, width?, height?, preserve_aspect=True, dpi=96)`**: Precise image placement
+- **Bounds validation**: Direct width+height validated pre-insert; aspect-derived validated post intrinsic read
+- **DPI Support**: Convert pixel coordinates from OCR (300 DPI typical)
+- **Format Support**: PNG, JPG/JPEG, GIF, BMP, WMF, EMF, TIFF
+
+#### **🎛️ Shape Management**
+- **`ppt_list_shapes(slide_index)`**: Get all shapes with precise geometry
+- **`ppt_delete_shape(slide_index, shape_id)`**: Remove shapes for corrections
+- **`ppt_set_z_order(slide_index, shape_id, action)`**: Layer control (bring_to_front, send_to_back, step_forward, step_backward)
+
+#### **🎯 Coordinate System & Units**
+- **Origin**: Top-left of slide (0,0)
+
+```
+PowerPoint Coordinate System (A4 Portrait):
+┌─────────────────────────────────────────────────────────────┐ (0,0)
+│ Origin: Top-left corner                                     │
+│                                                             │
+│  (72,144)                                                   │
+│     ┌─────────────┐                                         │
+│     │ Text Box    │ ← 200pt width                           │
+│     │ 50pt height │                                         │
+│     └─────────────┘                                         │
+│                                                             │
+│                                                             │
+│                                                             │
+│  Units: Points (pt), Millimeters (mm), Pixels (px)         │
+│  A4 Dimensions: 210mm × 297mm = 595.276 × 841.890 points   │
+│                                                             │
+│                                            (595.276,841.890)│
+└─────────────────────────────────────────────────────────────┘
+                      Bottom-right corner
+```
+
+- **Units Supported**: Points (default), millimeters (`"30mm"`), pixels (`"120px"` with DPI) (inches intentionally not supported)
+- **A4 Portrait**: 210mm × 297mm (595.276 × 841.890 points)
+- **Precision**: 3 decimal places, drift-tested for 80+ shape workflows
+
+#### **�️ Validation & Error Handling**
+```json
+{
+  "ok": true,
+  "shape_id": 123,
+  "left_pt": 72.000,
+  "top_pt": 144.000,
+  "width_pt": 200.000,
+  "height_pt": 50.000
+}
+```
+**Error Codes**: `not-found`, `out-of-bounds`, `invalid-size`, `invalid-color`, `invalid-unit`, `io-error`, `unsupported-format`
+
+#### **📋 OCR Reconstruction Example**
+```python
+# 1. Create A4 presentation
+await ppt_create_presentation(a4_portrait=True)
+await ppt_add_slide()
+
+# 2. Add text blocks from OCR coordinates
+await ppt_add_text_box(
+    slide_index=1,
+    left="25mm", top="30mm", 
+    width="160mm", height="12mm",
+    text="Document Title",
+    font={"name": "Arial", "size": 16, "bold": True, "color": "#000000"}
+)
+
+# 3. Add images at exact positions  
+await ppt_add_image(
+    slide_index=1,
+    path="/path/to/logo.png",
+    left="170mm", top="10mm",
+    width="30mm", height="15mm",
+    dpi=300  # OCR DPI
+)
+```
+
+### 🔧 **Enhanced Word Tools**
 - **Atomic Operations**: All-or-nothing execution with automatic rollback on failure
 - **Performance Limits**: Maximum 50 operations per call, 10,000 matches processed
 - **Comprehensive Validation**: 
@@ -24,12 +116,6 @@ This MCP server provides enhanced Word document manipulation capabilities with:
 - **Performance Limits**: Maximum 10,000 matches for optimal performance
 - **Enhanced Color Validation**: Supports CSS colors, hex codes, and Word constants
 - **Comprehensive Error Messages**: Clear guidance on supported formats
-
-### 🛡️ **Robust Error Handling**
-- **Validation Errors**: Parameter validation with specific ranges
-- **Performance Errors**: Clear limits to prevent server crashes  
-- **Execution Errors**: Document access and style existence validation
-- **Atomic Rollback**: Document restoration on operation failure
 
 ### 📊 **Supported Operations**
 

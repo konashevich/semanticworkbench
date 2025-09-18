@@ -9,10 +9,23 @@ import stat
 from mcp_server import settings
 from mcp_server.app_interaction.excel_editor import get_active_workbook, get_excel_app, get_workbook_content
 from mcp_server.app_interaction.powerpoint_editor import (
-    add_text_to_slide,
-    get_active_presentation,
+    mm_to_points,
+    parse_unit,
+    set_slide_size as pp_set_slide_size,
+    create_blank_slide,
+    add_text_box_at,
+    add_image_at,
+    list_slide_shapes,
+    apply_font_format,
+    apply_paragraph_format,
     get_powerpoint_app,
+    get_active_presentation,
     get_presentation_content,
+    validate_coordinates,
+    validate_font_size,
+    validate_color,
+    round_precision,
+    PPTValidationError,
 )
 from mcp_server.app_interaction.word_editor import (
     get_active_document,
@@ -2308,61 +2321,554 @@ def create_mcp_server() -> FastMCP:
 
     # endregion
 
-    @mcp.tool()
-    async def get_powerpoint_content() -> str:
-        """
-        Returns the content of all slides in the active PowerPoint presentation.
-        """
-        powerpoint = get_powerpoint_app()
-        presentation = get_active_presentation(powerpoint)
-        return get_presentation_content(presentation)
+    # ---------------- PowerPoint Advanced Tools -----------------
+
+    def _ppt_error_response(error: PPTValidationError) -> dict:
+        """Standardize error responses."""
+        return {"error": {"code": error.code, "message": error.message, "details": error.details}}
+    
+    def _ppt_success_coords(shape) -> dict:
+        """Return standardized coordinate response with precision rounding."""
+        return {
+            "shape_id": shape.Id,
+            "left_pt": round_precision(float(shape.Left)),
+            "top_pt": round_precision(float(shape.Top)),
+            "width_pt": round_precision(float(shape.Width)),
+            "height_pt": round_precision(float(shape.Height))
+        }
+
+    def _ppt_active():
+        ppt = get_powerpoint_app()
+        pres = get_active_presentation(ppt)
+        return ppt, pres
+
+    def _ppt_find_shape(slide, shape_id: int):
+        """Find shape by ID on slide."""
+        for idx in range(1, slide.Shapes.Count + 1):
+            sh = slide.Shapes(idx)
+            if sh.Id == shape_id:
+                return sh
+        return None
 
     @mcp.tool()
-    async def add_powerpoint_slide(slide_number: int, text: str) -> bool:
-        """
-        Adds a new slide at the specified position with the given text. Always call get_powerpoint_content to get the latest content and slide numbers.
-        DO NOT use Markdown formatting for the text, it will not be rendered correctly. Use plaintext.
-        At a maximum, add two bullet points to each slide.
+    async def ppt_get_content() -> dict:
+        """Returns the content of all slides in the active PowerPoint presentation.
 
-        Args:
-            slide_number: The position where to add the new slide
-            text: The text to add to the slide
-
-        Returns:
-            True if the slide was added successfully, False otherwise
-        """
-        powerpoint = get_powerpoint_app()
-        presentation = get_active_presentation(powerpoint)
-
-        # Add new blank slide
-        presentation.Slides.Add(slide_number, 12)
-
-        # Add the text to the new slide
-        add_text_to_slide(presentation, slide_number, text)
-        return True
-
-    @mcp.tool()
-    async def remove_powerpoint_slide(slide_number: int) -> bool:
-        """
-        Removes the slide at the specified position. Always call get_powerpoint_content to get the latest content and slide numbers.
-
-        Args:
-            slide_number: The position of the slide to remove
-
-        Returns:
-            True if the slide was removed successfully, False otherwise
+        Returns: {ok, content?, error?}
         """
         try:
-            powerpoint = get_powerpoint_app()
-            presentation = get_active_presentation(powerpoint)
+            _, pres = _ppt_active()
+            content = get_presentation_content(pres)
+            return {"ok": True, "content": content}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-            if slide_number <= 0 or slide_number > presentation.Slides.Count:
-                return False
+    @mcp.tool()
+    async def ppt_create_presentation(a4_portrait: bool = True, close_existing: bool = False) -> dict:
+        """Create a new PowerPoint presentation with optional A4 portrait sizing.
 
-            presentation.Slides(slide_number).Delete()
-            return True
-        except Exception:
-            return False
+        Args:
+            a4_portrait: Set slide size to A4 portrait (210mm x 297mm)  
+            close_existing: Close all existing presentations first
+        Returns: {ok, presentation_index?, width_pt?, height_pt?, error?}
+        """
+        try:
+            ppt = get_powerpoint_app()
+            if close_existing:
+                while ppt.Presentations.Count > 0:
+                    ppt.Presentations(1).Close()
+            pres = ppt.Presentations.Add()
+            if a4_portrait:
+                w = mm_to_points(210.0)
+                h = mm_to_points(297.0)
+                pp_set_slide_size(pres, w, h)
+            return {
+                "ok": True,
+                "presentation_index": ppt.Presentations.Count,
+                "width_pt": round_precision(float(pres.PageSetup.SlideWidth)),
+                "height_pt": round_precision(float(pres.PageSetup.SlideHeight)),
+            }
+        except Exception as e:
+            return {"ok": False, "error": {"code": "creation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_set_slide_size(width: str | float, height: str | float) -> dict:
+        """Set current presentation slide size with unit support.
+
+        Args:
+            width: Width in points or with unit suffix (e.g., '210mm', '8.5in', '612pt')
+            height: Height in points or with unit suffix
+        Returns: {ok, width_pt?, height_pt?, error?}
+        """
+        try:
+            _, pres = _ppt_active()
+            w_pt = parse_unit(width)
+            h_pt = parse_unit(height)
+            if w_pt <= 0 or h_pt <= 0:
+                raise PPTValidationError("invalid-size", f"Slide dimensions must be positive: {w_pt}x{h_pt}")
+            pp_set_slide_size(pres, w_pt, h_pt)
+            return {
+                "ok": True,
+                "width_pt": round_precision(float(pres.PageSetup.SlideWidth)),
+                "height_pt": round_precision(float(pres.PageSetup.SlideHeight))
+            }
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_add_slide(position: int | None = None, layout: str = "blank") -> dict:
+        """Add a new slide at specified position.
+
+        Args:
+            position: 1-based position to insert (None = append at end)
+            layout: "blank" or "title"
+        Returns: {ok, slide_index?, error?}
+        """
+        try:
+            _, pres = _ppt_active()
+            slide = create_blank_slide(pres, position=position, layout=layout)
+            return {"ok": True, "slide_index": slide.SlideIndex}
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_add_text_box(
+        slide_index: int, 
+        left: str | float, 
+        top: str | float, 
+        width: str | float, 
+        height: str | float, 
+        text: str, 
+        font: dict | None = None, 
+        paragraph: dict | None = None,
+        dpi: float = 96.0
+    ) -> dict:
+        """Add a text box at precise coordinates with comprehensive formatting.
+
+        Units: numeric = points, or suffixed with mm/pt/px.
+        Font options: name, size, color, bold, italic, underline, strikethrough, superscript, subscript
+        Paragraph options: alignment, line_spacing, space_before, space_after, bullets, left_indent, first_line_indent
+        Returns: {ok, shape_id?, left_pt?, top_pt?, width_pt?, height_pt?, error?}
+        """
+        try:
+            _, pres = _ppt_active()
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            
+            slide = pres.Slides(slide_index)
+            l = parse_unit(left, dpi=dpi)
+            t = parse_unit(top, dpi=dpi)  
+            w = parse_unit(width, dpi=dpi)
+            h = parse_unit(height, dpi=dpi)
+            
+            sw = float(pres.PageSetup.SlideWidth)
+            sh = float(pres.PageSetup.SlideHeight)
+            validate_coordinates(l, t, w, h, sw, sh)
+            
+            tb = add_text_box_at(slide, l, t, w, h, text)
+            rng = tb.TextFrame.TextRange
+            
+            if font:
+                apply_font_format(rng, font)
+            if paragraph:
+                apply_paragraph_format(rng, paragraph)
+                
+            result = _ppt_success_coords(tb)
+            result["ok"] = True
+            return result
+            
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_update_text_box(
+        slide_index: int,
+        shape_id: int,
+        text: str | None = None,
+        font: dict | None = None,
+        paragraph: dict | None = None
+    ) -> dict:
+        """Update existing text box content and/or formatting.
+        
+        Args:
+            slide_index: 1-based slide number
+            shape_id: Shape ID from previous add/list operations
+            text: New text content (None = no change)
+            font: Font formatting updates
+            paragraph: Paragraph formatting updates
+        Returns: {ok, shape_id?, left_pt?, top_pt?, width_pt?, height_pt?, error?}
+        """
+        try:
+            _, pres = _ppt_active()
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            
+            slide = pres.Slides(slide_index)
+            target = _ppt_find_shape(slide, shape_id)
+            if target is None:
+                raise PPTValidationError("not-found", f"Shape {shape_id} not found")
+            
+            if not hasattr(target, "TextFrame"):
+                raise PPTValidationError("invalid-shape", "Shape is not a text box")
+            
+            rng = target.TextFrame.TextRange
+            if text is not None:
+                rng.Text = text
+            if font:
+                apply_font_format(rng, font)
+            if paragraph:
+                apply_paragraph_format(rng, paragraph)
+            
+            result = _ppt_success_coords(target)
+            result["ok"] = True
+            return result
+            
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_add_image(
+        slide_index: int, 
+        path: str, 
+        left: str | float, 
+        top: str | float, 
+        width: str | float | None = None, 
+        height: str | float | None = None, 
+        preserve_aspect: bool = True,
+        dpi: float = 96.0
+    ) -> dict:
+        """Add an image to a slide with enhanced validation and DPI support.
+
+        Returns: {ok, shape_id?, left_pt?, top_pt?, width_pt?, height_pt?, natural_width_pt?, natural_height_pt?, error?}
+        """
+        try:
+            from mcp_server.path_utils import resolve_user_path
+            _, pres = _ppt_active()
+            
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            
+            slide = pres.Slides(slide_index)
+            p = resolve_user_path(path)
+            if not p.is_file():
+                raise PPTValidationError("io-error", f"Image file not found: {p}")
+            
+            supported_formats = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".wmf", ".emf", ".tiff", ".tif"}
+            if p.suffix.lower() not in supported_formats:
+                raise PPTValidationError("unsupported-format", f"Unsupported image format: {p.suffix}")
+            
+            l = parse_unit(left, dpi=dpi)
+            t = parse_unit(top, dpi=dpi)
+            w_pt = parse_unit(width, dpi=dpi) if width is not None else None
+            h_pt = parse_unit(height, dpi=dpi) if height is not None else None
+            
+            # Insert once to read intrinsic size without scaling
+            pic = add_image_at(slide, str(p), l, t, w_pt, h_pt, preserve_aspect=preserve_aspect, dpi=dpi)
+            intrinsic_width = round_precision(float(pic.Width))
+            intrinsic_height = round_precision(float(pic.Height))
+            # After add_image_at returns, pic may have been resized; capture final
+            result = _ppt_success_coords(pic)
+            result.update({
+                "ok": True,
+                "natural_width_pt": intrinsic_width,
+                "natural_height_pt": intrinsic_height,
+                "final_width_pt": result["width_pt"],
+                "final_height_pt": result["height_pt"]
+            })
+            return result
+            
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_list_shapes(slide_index: int) -> dict:
+        """List all shapes on a slide with precise geometry.
+        
+        Returns: {ok, shapes?, error?}
+        """
+        try:
+            _, pres = _ppt_active()
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            
+            slide = pres.Slides(slide_index)
+            shapes = list_slide_shapes(slide)
+            # Apply precision rounding to all coordinates
+            for shape in shapes:
+                for key in ["left_pt", "top_pt", "width_pt", "height_pt"]:
+                    if key in shape:
+                        shape[key] = round_precision(shape[key])
+            
+            return {"ok": True, "shapes": shapes}
+            
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_delete_shape(slide_index: int, shape_id: int) -> dict:
+        """Delete a shape from a slide.
+        
+        Returns: {ok, error?}
+        """
+        try:
+            _, pres = _ppt_active()
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            
+            slide = pres.Slides(slide_index)
+            target = _ppt_find_shape(slide, shape_id)
+            if target is None:
+                raise PPTValidationError("not-found", f"Shape {shape_id} not found")
+            
+            target.Delete()
+            return {"ok": True}
+            
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    # ---------- PowerPoint Save / Close / List Utilities ----------
+
+    def _ppt_resolve_index(ppt, presentation_index: int | None):
+        if presentation_index is None:
+            if ppt.Presentations.Count == 0:
+                raise PPTValidationError("not-found", "No presentation is open")
+            if ppt.Presentations.Count > 1:
+                raise PPTValidationError("ambiguous", "Multiple presentations open; specify 'presentation_index'")
+            return ppt.Presentations(1)
+        if presentation_index < 1 or presentation_index > ppt.Presentations.Count:
+            raise PPTValidationError("not-found", f"Presentation index {presentation_index} out of range")
+        return ppt.Presentations(presentation_index)
+
+    @mcp.tool()
+    async def ppt_list_presentations() -> dict:
+        """List open PowerPoint presentations with basic metadata.
+
+        Returns: {ok, presentations: [{index, path, saved, slides, width_pt, height_pt}], error?}
+        """
+        try:
+            ppt = get_powerpoint_app()
+            items = []
+            for i in range(1, ppt.Presentations.Count + 1):
+                try:
+                    p = ppt.Presentations(i)
+                    items.append({
+                        "index": i,
+                        "path": getattr(p, "FullName", ""),
+                        "saved": bool(getattr(p, "Saved", False)),
+                        "slides": int(getattr(p.Slides, "Count", 0)),
+                        "width_pt": round_precision(float(p.PageSetup.SlideWidth)),
+                        "height_pt": round_precision(float(p.PageSetup.SlideHeight)),
+                    })
+                except Exception:
+                    continue
+            return {"ok": True, "presentations": items}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_save_presentation(presentation_index: int | None = None) -> dict:
+        """Save the specified PowerPoint presentation or the single open one.
+
+        Returns: {ok, path?, notes?, error?}
+        """
+        try:
+            ppt = get_powerpoint_app()
+            pres = _ppt_resolve_index(ppt, presentation_index)
+            # If never saved (no FullName), raise helpful error
+            path = getattr(pres, "FullName", "") or ""
+            if not path:
+                return {"ok": False, "error": {"code": "unsaved", "message": "Presentation has no path. Use ppt_save_presentation_as."}}
+            try:
+                pres.Save()
+            except Exception as ex:
+                return {"ok": False, "error": {"code": "save-failed", "message": str(ex)}}
+            return {"ok": True, "path": path, "notes": "saved"}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_save_presentation_as(target_path: str, presentation_index: int | None = None, overwrite: bool = False, close_after: bool = False, reveal: bool = False) -> dict:
+        """Save (export) the specified or single presentation to a .pptx file.
+
+        Args:
+            target_path: Desired output path (will normalize extension to .pptx)
+            presentation_index: Optional index if multiple are open
+            overwrite: Allow replacing existing file
+            close_after: Close the presentation after saving
+            reveal: Make PowerPoint visible
+        Returns: {ok, target_path?, bytes?, notes?, error?}
+        """
+        try:
+            from mcp_server.path_utils import resolve_user_path
+            ppt = get_powerpoint_app()
+            pres = _ppt_resolve_index(ppt, presentation_index)
+            p = resolve_user_path(target_path)
+            if p.suffix.lower() != ".pptx":
+                p = p.with_suffix(".pptx")
+            if p.exists() and not overwrite:
+                return {"ok": False, "error": {"code": "exists", "message": f"Target already exists: {p}"}}
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as ex:
+                return {"ok": False, "error": {"code": "io-error", "message": f"Failed to create parent directory: {ex}"}}
+            # Enforce sandbox (reuse Word helper signatures if present)
+            try:
+                ok, msg = _sandbox_ok(p)  # type: ignore[name-defined]
+                if not ok:
+                    return {"ok": False, "error": {"code": "sandbox", "message": msg}}
+            except Exception:
+                pass
+            try:
+                # Prefer SaveCopyAs to avoid rebinding active presentation
+                try:
+                    pres.SaveCopyAs(str(p))  # type: ignore[attr-defined]
+                except Exception:
+                    pres.SaveAs(str(p))
+            except Exception as ex:
+                return {"ok": False, "error": {"code": "save-failed", "message": str(ex)}}
+            if reveal:
+                try:
+                    ppt.Visible = True
+                except Exception:
+                    pass
+            if close_after:
+                try:
+                    pres.Close()
+                except Exception:
+                    pass
+            size = 0
+            try:
+                size = p.stat().st_size
+            except Exception:
+                pass
+            return {"ok": True, "target_path": str(p), "bytes": int(size), "notes": "saved"}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_close_presentation(presentation_index: int | None = None, save: bool = False) -> dict:
+        """Close a specific PowerPoint presentation, or all if none specified.
+
+        Returns: {ok, closed?, error?}
+        """
+        try:
+            ppt = get_powerpoint_app()
+            if presentation_index is None:
+                count = int(ppt.Presentations.Count)
+                closed = 0
+                for _ in range(count):
+                    try:
+                        pres = ppt.Presentations(1)
+                        if save:
+                            try:
+                                pres.Save()
+                            except Exception:
+                                pass
+                        pres.Close()
+                        closed += 1
+                    except Exception:
+                        break
+                return {"ok": True, "closed": closed}
+            pres = _ppt_resolve_index(ppt, presentation_index)
+            try:
+                if save:
+                    try:
+                        pres.Save()
+                    except Exception:
+                        pass
+                pres.Close()
+            except Exception as ex:
+                return {"ok": False, "error": {"code": "close-failed", "message": str(ex)}}
+            return {"ok": True, "closed": 1}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_reveal(presentation_index: int | None = None) -> dict:
+        """Make the PowerPoint window visible and optionally activate the specified presentation.
+
+        Returns: {ok, activated_index?, error?}
+        """
+        try:
+            ppt = get_powerpoint_app()
+            try:
+                ppt.Visible = True
+            except Exception:
+                pass
+            if ppt.Presentations.Count == 0:
+                return {"ok": True, "activated_index": None, "notes": "No presentations open"}
+            try:
+                pres = _ppt_resolve_index(ppt, presentation_index)
+                pres.Windows(1).Activate()  # type: ignore[attr-defined]
+                return {"ok": True, "activated_index": pres.SlideShowWindow.View.Slide.SlideIndex if hasattr(pres, 'SlideShowWindow') else None}
+            except PPTValidationError:
+                # If ambiguous or not-found, still return visible without activation
+                return {"ok": True, "activated_index": None}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool()
+    async def ppt_set_z_order(slide_index: int, shape_id: int, action: str) -> dict:
+        """Change z-order of shape with comprehensive actions.
+        
+        Actions: bring_to_front, send_to_back, step_forward, step_backward
+        Returns: {ok, shape_id?, z_order?, error?}
+        """
+        try:
+            _, pres = _ppt_active()
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            
+            slide = pres.Slides(slide_index)
+            target = _ppt_find_shape(slide, shape_id)
+            if target is None:
+                raise PPTValidationError("not-found", f"Shape {shape_id} not found")
+            
+            action_map = {
+                "bring_to_front": 0,   # msoBringToFront
+                "send_to_back": 1,     # msoSendToBack  
+                "step_forward": 2,     # msoBringForward
+                "step_backward": 3     # msoSendBackward
+            }
+            act = action_map.get(action.lower())
+            if act is None:
+                raise PPTValidationError("invalid-argument", f"Unsupported z-order action: {action}")
+            
+            target.ZOrder(act)
+            return {
+                "ok": True,
+                "shape_id": target.Id,
+                "z_order": getattr(target, "ZOrderPosition", None)
+            }
+            
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
     @mcp.tool()
     async def get_excel_content() -> str:
