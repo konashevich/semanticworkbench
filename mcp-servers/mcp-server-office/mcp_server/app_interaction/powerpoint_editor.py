@@ -48,26 +48,38 @@ _NAMED_COLORS = {
 # Validation helpers
 class PPTValidationError(Exception):
     def __init__(self, code: str, message: str, details: dict | None = None):
-        self.code = code
+        # Normalize legacy / granular codes to documented set
+        alias_map = {
+            "out-of-bounds": "out-of-range",
+            "invalid-size": "invalid-dimensions",
+            "invalid-font-size": "validation-failed",
+            "invalid-color": "validation-failed",
+            "unsupported-format": "validation-failed",
+        }
+        base_code = alias_map.get(code, code)
+        self.code = base_code
         self.message = message
+        # Preserve original specific code in details if normalized
+        if code != base_code:
+            details = {**(details or {}), "original_code": code}
         self.details = details or {}
         super().__init__(message)
 
 def validate_coordinates(left: float, top: float, width: float, height: float, slide_width: float, slide_height: float) -> None:
     """Validate shape coordinates against slide bounds."""
     if left < 0 or top < 0:
-        raise PPTValidationError("out-of-bounds", f"Negative coordinates not allowed: left={left}, top={top}")
+        raise PPTValidationError("out-of-range", f"Negative coordinates not allowed: left={left}, top={top}")
     if width <= 0 or height <= 0:
-        raise PPTValidationError("invalid-size", f"Width and height must be positive: width={width}, height={height}")
+        raise PPTValidationError("invalid-dimensions", f"Width and height must be positive: width={width}, height={height}")
     if left + width > slide_width:
-        raise PPTValidationError("out-of-bounds", f"Shape extends beyond slide width: {left + width} > {slide_width}")
+        raise PPTValidationError("out-of-range", f"Shape extends beyond slide width: {left + width} > {slide_width}")
     if top + height > slide_height:
-        raise PPTValidationError("out-of-bounds", f"Shape extends beyond slide height: {top + height} > {slide_height}")
+        raise PPTValidationError("out-of-range", f"Shape extends beyond slide height: {top + height} > {slide_height}")
 
 def validate_font_size(size: float) -> None:
     """Validate font size is within acceptable range."""
     if size < 1 or size > 1638:
-        raise PPTValidationError("invalid-font-size", f"Font size must be between 1 and 1638 points, got {size}")
+        raise PPTValidationError("validation-failed", f"Font size must be between 1 and 1638 points, got {size}", {"field": "font.size"})
 
 def validate_color(color: str | int) -> int:
     """Parse and validate color value."""
@@ -78,10 +90,10 @@ def validate_color(color: str | int) -> int:
         try:
             return _rgb_from_hex(s)
         except Exception:
-            raise PPTValidationError("invalid-color", f"Invalid hex color: {color}")
+            raise PPTValidationError("validation-failed", f"Invalid hex color: {color}", {"field": "font.color"})
     if s in _NAMED_COLORS:
         return _NAMED_COLORS[s]
-    raise PPTValidationError("invalid-color", f"Unknown color: {color}")
+    raise PPTValidationError("validation-failed", f"Unknown color: {color}", {"field": "font.color"})
 
 def round_precision(value: float, decimals: int = 3) -> float:
     """Round coordinate values to prevent floating point drift."""

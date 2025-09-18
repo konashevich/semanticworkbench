@@ -2324,8 +2324,8 @@ def create_mcp_server() -> FastMCP:
     # ---------------- PowerPoint Advanced Tools -----------------
 
     def _ppt_error_response(error: PPTValidationError) -> dict:
-        """Standardize error responses."""
-        return {"error": {"code": error.code, "message": error.message, "details": error.details}}
+        """Standardize error responses with explicit ok flag."""
+        return {"ok": False, "error": {"code": error.code, "message": error.message, "details": error.details}}
     
     def _ppt_success_coords(shape) -> dict:
         """Return standardized coordinate response with precision rounding."""
@@ -2636,9 +2636,11 @@ def create_mcp_server() -> FastMCP:
                 "superscript": True,
                 "subscript": True
             }
+            # Authoritative union of emitted codes (post-normalization / aliasing)
             error_codes = [
                 "not-found","ambiguous","unsaved","invalid-unit","invalid-dimensions","invalid-action",
-                "out-of-range","creation-failed","operation-failed","overwrite-denied","io-error","validation-failed"
+                "out-of-range","creation-failed","operation-failed","overwrite-denied","io-error",
+                "validation-failed","close-failed","sandbox"
             ]
             return {
                 "ok": True,
@@ -2680,7 +2682,7 @@ def create_mcp_server() -> FastMCP:
             
             supported_formats = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".wmf", ".emf", ".tiff", ".tif"}
             if p.suffix.lower() not in supported_formats:
-                raise PPTValidationError("unsupported-format", f"Unsupported image format: {p.suffix}")
+                raise PPTValidationError("validation-failed", f"Unsupported image format: {p.suffix}", {"field": "image.format"})
             
             l = parse_unit(left, dpi=dpi)
             t = parse_unit(top, dpi=dpi)

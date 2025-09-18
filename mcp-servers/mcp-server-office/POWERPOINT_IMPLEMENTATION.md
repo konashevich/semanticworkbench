@@ -134,7 +134,12 @@ Error conditions:
 - **Thread safety**: Uses existing Word MCP server concurrency patterns
 - Added save/list/close/reveal tools mirroring Word capability patterns.
 - `ppt_save_presentation_as` prefers `SaveCopyAs` then falls back to `SaveAs`.
-- Consistent `{ok, ...}` envelope with structured error codes: `unsaved`, `ambiguous`, `not-found`, `overwrite-denied`, `operation-failed`, `io-error`, `invalid-unit`, `invalid-dimensions`, `invalid-action`, `creation-failed`, `validation-failed`, `out-of-range`, `close-failed`.
+- Consistent `{ok, ...}` envelope with structured error codes (all error responses now include `ok: false`).
+- Canonical error code set (post-normalization): `unsaved`, `ambiguous`, `not-found`, `overwrite-denied`, `operation-failed`, `io-error`, `invalid-unit`, `invalid-dimensions`, `invalid-action`, `creation-failed`, `validation-failed`, `out-of-range`, `close-failed`, `sandbox`.
+- Normalization aliases (original granular codes preserved in `error.details.original_code` when applicable):
+	- `out-of-bounds` → `out-of-range`
+	- `invalid-size` → `invalid-dimensions`
+	- `invalid-font-size`, `invalid-color`, `unsupported-format` → `validation-failed`
 
 ## 🚀 Ready for Production
 
