@@ -168,6 +168,18 @@ The SSE URL is:
 http://127.0.0.1:25566/sse
 ```
 
+## File Operations (Word)
+
+Two new tools provide essential file lifecycle actions for Word:
+
+- `create_word_document(path, content?, content_format='markdown', overwrite=false, make_active=true, visible=false)`
+- `save_word_document_as(target_path, source_path?, format='docx', overwrite=false, include_comments=true, close_after=false)`
+
+Notes:
+- Supports formats: `docx`, `pdf`, and `md` (markdown export is written by the server).
+- Set `MCP_OFFICE_SANDBOX_ROOT` to restrict file I/O to a directory tree.
+- Per-document locking and atomic save patterns are used for safety.
+
 ## Client Configuration
 
 To use this MCP server in your setup, consider the following configuration:

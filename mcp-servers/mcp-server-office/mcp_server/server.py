@@ -19,6 +19,8 @@ from mcp_server.app_interaction.word_editor import (
     get_markdown_representation,
     get_word_app,
     parse_font_color,
+    write_markdown_to_document,
+    replace_document_content,
     set_range_font,
     set_range_paragraph,
     apply_list_format,
@@ -198,6 +200,28 @@ async def _run_on_worker_with_cleanup(p: Path, fn):
 def create_mcp_server() -> FastMCP:
     mcp = FastMCP(name=server_name, log_level=settings.log_level, host="127.0.0.1")
 
+    # region: helpers (sandbox)
+    def _sandbox_ok(p: Path) -> tuple[bool, str]:
+        root = os.getenv("MCP_OFFICE_SANDBOX_ROOT", "").strip()
+        if not root:
+            return True, ""
+        try:
+            r = Path(os.path.expanduser(os.path.expandvars(root))).resolve()
+            pp = p.resolve()
+            try:
+                # Python 3.11+
+                if pp.is_relative_to(r):
+                    return True, ""
+                return False, f"Path {pp} is outside sandbox root {r}"
+            except Exception:
+                # Fallback for older Path
+                if str(pp).lower().startswith(str(r).lower() + os.sep) or str(pp).lower() == str(r).lower():
+                    return True, ""
+                return False, f"Path {pp} is outside sandbox root {r}"
+        except Exception as e:
+            return False, f"Sandbox root invalid: {e}"
+    # endregion
+
     @mcp.tool()
     async def open_word_document(path: str) -> str:
         """Opens the specified .docx file in Word and returns its markdown representation.
@@ -270,6 +294,356 @@ def create_mcp_server() -> FastMCP:
             return await with_doc_lock(canonical_doc_key(str(p)), _task)
         except Exception as e:
             return f"ERROR: Failed to open document: {e}"
+
+    @mcp.tool()
+    async def create_word_document(
+        path: str,
+        content: str = "",
+        content_format: str = "markdown",
+        overwrite: bool = False,
+        make_active: bool = True,
+        visible: bool = False,
+        template: str = "default",
+    ) -> dict | str:
+        """Create a new .docx at `path` (optionally seeded with content).
+
+        Args:
+            path: Target .docx path.
+            content: Initial content text.
+            content_format: 'markdown' | 'plain' | 'none'.
+            overwrite: Allow replacing existing file.
+            make_active: Keep document open/active after creation.
+            visible: Show Word window.
+            template: Currently only 'default' supported (others ignored).
+        Returns:
+            Success dict with metadata or error string prefixed with 'ERROR:'.
+        """
+        from mcp_server.path_utils import resolve_user_path
+        try:
+            p = resolve_user_path(path)
+            if p.suffix.lower() != ".docx":
+                # Auto-append .docx if user omitted extension
+                p = p.with_suffix(".docx")
+            ok, msg = _sandbox_ok(p)
+            if not ok:
+                return f"ERROR: {msg}"
+            if p.exists() and not overwrite:
+                return f"ERROR: File already exists: {p}"
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                return f"ERROR: Failed to create parent directory: {e}"
+
+            cf = (content_format or "markdown").strip().lower()
+            allowed_cf = {"markdown", "plain", "text", "none"}
+            if cf not in allowed_cf:
+                return f"ERROR: Unsupported content_format: {cf} (allowed: markdown|plain|none)"
+            tmpl = (template or "default").strip().lower()
+            allowed_templates = {"default", "blank", "minimal_heading", "research"}
+            if tmpl not in allowed_templates:
+                return f"ERROR: Unsupported template: {tmpl} (allowed: default|blank|minimal_heading|research)"
+
+            def _derive_template_seed(tmpl_name: str) -> str:
+                if tmpl_name == "blank":
+                    return ""
+                if tmpl_name == "minimal_heading":
+                    return "# Title\n\n"
+                if tmpl_name == "research":
+                    return ("# Title\n\n## Abstract\n\n## Introduction\n\n## Methods\n\n"
+                            "## Results\n\n## Discussion\n\n")
+                return ""  # default
+
+            def _do_on_worker(word):
+                created_path = None
+                try:
+                    # new document
+                    doc = word.Documents.Add()
+                    try:
+                        if visible:
+                            word.Visible = True
+                    except Exception:
+                        pass
+                    # seed content or template if no explicit content
+                    seed_text = content
+                    if not seed_text:
+                        seed_text = _derive_template_seed(tmpl)
+                    if seed_text:
+                        if cf == "markdown":
+                            write_markdown_to_document(doc, seed_text)
+                        elif cf in ("plain", "text"):
+                            replace_document_content(doc, seed_text)
+                        # cf == none -> ignore even if template provided
+                    # save (use SaveAs2 when available)
+                    try:
+                        doc.SaveAs2(str(p))  # type: ignore[attr-defined]
+                    except Exception:
+                        doc.SaveAs(str(p))
+                    created_path = str(p)
+                    # activation/visibility
+                    try:
+                        if make_active:
+                            doc.Activate()
+                        else:
+                            # Optionally close if not keeping active
+                            doc.Close(SaveChanges=0)
+                    except Exception:
+                        pass
+                    size = 0
+                    try:
+                        size = p.stat().st_size
+                    except Exception:
+                        pass
+                    return {
+                        "created": True,
+                        "path": str(p),
+                        "activated": bool(make_active),
+                        "size_bytes": int(size),
+                        "notes": "created",
+                    }
+                except Exception as ex:
+                    # best-effort cleanup of partially created file
+                    try:
+                        if created_path and Path(created_path).exists():
+                            Path(created_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    return {"error": f"create_word_document failed: {ex}"}
+
+            async def _task_create():
+                return await _run_on_worker_with_cleanup(p, _do_on_worker)
+
+            res = await with_doc_lock(canonical_doc_key(str(p)), _task_create)
+            # normalize error
+            if isinstance(res, dict) and "error" in res:
+                return f"ERROR: {res['error']}"
+            return res
+        except Exception as e:
+            return f"ERROR: create_word_document failed: {e}"
+
+    @mcp.tool()
+    async def save_word_document_as(
+        target_path: str,
+        source_path: str = "",
+        format: str = "docx",
+        overwrite: bool = False,
+        include_comments: bool = True,
+        close_after: bool = False,
+        reveal: bool = False,
+    ) -> dict | str:
+        """Save the specified (or active single) document to a new path/format.
+
+        Supported formats: docx, pdf, md (markdown export via server).
+        """
+        from mcp_server.path_utils import resolve_user_path
+        try:
+            t = resolve_user_path(target_path)
+            ok, msg = _sandbox_ok(t)
+            if not ok:
+                return f"ERROR: {msg}"
+            try:
+                t.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                return f"ERROR: Failed to create parent directory: {e}"
+            fmt = (format or "docx").strip().lower()
+            if fmt not in ("docx", "pdf", "md"):
+                return f"ERROR: Unsupported format: {fmt}"
+            # Auto-normalize extension if missing / mismatched for docx or pdf; md handled separately
+            expected_ext = ".docx" if fmt == "docx" else (".pdf" if fmt == "pdf" else ".md")
+            if t.suffix.lower() != expected_ext:
+                t = t.with_suffix(expected_ext)
+            if t.exists() and not overwrite:
+                return f"ERROR: Target already exists: {t}"
+
+            # Word constants
+            WD_FORMAT_PDF = 17
+            WD_FORMAT_DOCX = 12  # wdFormatXMLDocument
+
+            def _save_from_doc(doc, word):
+                # Handle markdown export separately
+                if fmt == "md":
+                    md = get_markdown_representation(doc)
+                    try:
+                        with open(t, "w", encoding="utf-8") as f:
+                            f.write(md)
+                    except Exception as e:
+                        return {"error": f"Failed to write markdown file: {e}"}
+                else:
+                    # choose format
+                    fcode = WD_FORMAT_PDF if fmt == "pdf" else WD_FORMAT_DOCX
+                    # Prefer SaveCopyAs to avoid changing source doc binding
+                    try:
+                        doc.SaveCopyAs(FileName=str(t), FileFormat=fcode)  # type: ignore[attr-defined]
+                    except Exception:
+                        try:
+                            # Fallback to SaveAs2 (will rebind document path)
+                            doc.SaveAs2(FileName=str(t), FileFormat=fcode)  # type: ignore[attr-defined]
+                        except Exception:
+                            doc.SaveAs(FileName=str(t), FileFormat=fcode)
+                try:
+                    if reveal:
+                        word.Visible = True
+                except Exception:
+                    pass
+                try:
+                    if close_after and fmt != "md":
+                        # If we used SaveAs2, document may now point to target; close it safely
+                        try:
+                            doc.Close(SaveChanges=0)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                size = 0
+                try:
+                    size = t.stat().st_size
+                except Exception:
+                    pass
+                return {"saved": True, "target_path": str(t), "bytes": int(size), "format": fmt, "notes": "saved"}
+
+            if source_path:
+                s = resolve_user_path(source_path)
+                if not s.exists():
+                    return f"ERROR: Source file not found: {s}"
+                # run on worker keyed by source
+                def _do_on_worker(word):
+                    # find or open source doc
+                    target = None
+                    for i in range(1, max(1, getattr(word.Documents, "Count", 0)) + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(s, d.FullName):
+                                target = d
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        try:
+                            target = word.Documents.Open(str(s), ReadOnly=False)
+                        except Exception:
+                            target = word.Documents.Open(str(s))  # type: ignore[attr-defined]
+                    try:
+                        _make_doc_editable(target)
+                    except Exception:
+                        pass
+                    return _save_from_doc(target, word)
+
+                async def _task_save_path():
+                    return await _run_on_worker_with_cleanup(s, _do_on_worker)
+
+                res = await with_doc_lock(canonical_doc_key(str(s)), _task_save_path)
+            else:
+                # Use the only active document
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    w = get_word_app()
+                    if w.Documents.Count == 0:
+                        return {"__error__": "No document is open. Provide 'source_path' or open one."}
+                    if w.Documents.Count > 1:
+                        return {"__error__": "Multiple documents are open. Provide 'source_path' to target the right file."}
+                    d = get_active_document(w)
+                    return _save_from_doc(d, w)
+
+                async def _task_save_active():
+                    return await asyncio.to_thread(_do_active)
+
+                res = await with_global_lock(_task_save_active)
+
+            if isinstance(res, dict) and "__error__" in res:
+                return f"ERROR: {res['__error__']}"
+            if isinstance(res, dict) and "error" in res:
+                return f"ERROR: {res['error']}"
+            return res
+        except Exception as e:
+            return f"ERROR: save_word_document_as failed: {e}"
+
+    @mcp.tool()
+    async def list_word_documents() -> list[dict] | str:
+        """List open Word documents with basic metadata.
+
+        Returns list of { path, read_only, active, modified }."""
+        try:
+            import asyncio
+            def _do():
+                try:
+                    import pythoncom  # type: ignore
+                    pythoncom.CoInitialize()
+                except Exception:
+                    pass
+                w = get_word_app()
+                docs = []
+                count = getattr(w.Documents, "Count", 0)
+                active_full = None
+                try:
+                    if count:
+                        active_full = w.ActiveDocument.FullName
+                except Exception:
+                    pass
+                for i in range(1, count + 1):
+                    try:
+                        d = w.Documents(i)
+                        docs.append({
+                            "path": d.FullName,
+                            "read_only": bool(getattr(d, "ReadOnly", False)),
+                            "active": _paths_equal(Path(d.FullName), active_full) if active_full else False,
+                            "modified": bool(getattr(d, "Saved", False) is False),
+                        })
+                    except Exception:
+                        continue
+                return docs
+            return await asyncio.to_thread(_do)
+        except Exception as e:
+            return f"ERROR: list_word_documents failed: {e}"
+
+    @mcp.tool()
+    async def save_word_document(path: str = "") -> str:
+        """Save the specified Word document or the single active one if no path given."""
+        try:
+            import asyncio
+            from mcp_server.path_utils import resolve_user_path
+            if path:
+                p = resolve_user_path(path)
+                def _do_on_worker(word):
+                    for i in range(1, max(1, getattr(word.Documents, "Count", 0)) + 1):
+                        try:
+                            d = word.Documents(i)
+                            if _paths_equal(p, d.FullName):
+                                try:
+                                    d.Save()
+                                    return "Saved"
+                                except Exception as ex:
+                                    return f"ERROR: Save failed: {ex}"
+                        except Exception:
+                            continue
+                    return "ERROR: Document not open"
+                async def _task():
+                    return await _run_on_worker_with_cleanup(p, _do_on_worker)
+                return await with_doc_lock(canonical_doc_key(str(p)), _task)
+            else:
+                def _do_active():
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
+                    w = get_word_app()
+                    if w.Documents.Count == 0:
+                        return "ERROR: No document open"
+                    if w.Documents.Count > 1:
+                        return "ERROR: Multiple documents open; provide 'path'"
+                    try:
+                        w.ActiveDocument.Save()
+                        return "Saved"
+                    except Exception as ex:
+                        return f"ERROR: Save failed: {ex}"
+                async def _task_active():
+                    return await asyncio.to_thread(_do_active)
+                return await with_global_lock(_task_active)
+        except Exception as e:
+            return f"ERROR: save_word_document failed: {e}"
 
     @mcp.tool()
     async def edit_word_document(task: str, ctx: Context) -> str:
