@@ -3003,42 +3003,6 @@ def create_mcp_server() -> FastMCP:
         paragraph: dict | None = None,
     ) -> dict:
         return await _ppt_update_text_box(slide_index, shape_id, text, font, paragraph)
-        """Change z-order of shape with comprehensive actions.
-        
-        Actions: bring_to_front, send_to_back, step_forward, step_backward
-        Returns: {ok, shape_id?, z_order?, error?}
-        """
-        try:
-            _, pres = _ppt_active()
-            if slide_index < 1 or slide_index > pres.Slides.Count:
-                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
-            
-            slide = pres.Slides(slide_index)
-            target = _ppt_find_shape(slide, shape_id)
-            if target is None:
-                raise PPTValidationError("not-found", f"Shape {shape_id} not found")
-            
-            action_map = {
-                "bring_to_front": 0,   # msoBringToFront
-                "send_to_back": 1,     # msoSendToBack  
-                "step_forward": 2,     # msoBringForward
-                "step_backward": 3     # msoSendBackward
-            }
-            act = action_map.get(action.lower())
-            if act is None:
-                raise PPTValidationError("invalid-argument", f"Unsupported z-order action: {action}")
-            
-            target.ZOrder(act)
-            return {
-                "ok": True,
-                "shape_id": target.Id,
-                "z_order": getattr(target, "ZOrderPosition", None)
-            }
-            
-        except PPTValidationError as e:
-            return _ppt_error_response(e)
-        except Exception as e:
-            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
     @mcp.tool()
     async def get_excel_content() -> str:

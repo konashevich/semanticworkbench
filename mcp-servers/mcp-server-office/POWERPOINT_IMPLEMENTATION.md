@@ -7,28 +7,27 @@
 - ✅ Removed deprecated demo helper (`add_text_to_slide`) and demo entry point
 - ✅ Backward compatibility layer eliminated
 
-### 🎯 New PowerPoint Tools (15 tools total)
+### 🎯 New PowerPoint Tools (18 tools total)
 
-#### **Core Presentation Management**
-1. **`ppt_get_content()`** - Get all slide content (replacement for legacy tool)
-2. **`ppt_create_presentation(a4_portrait=True, close_existing=False)`** - Create new presentation with A4 defaults (now always auto-creates a blank slide at index `1`)
-3. **`ppt_set_slide_size(width, height)`** - Custom slide dimensions with unit parsing
-4. **`ppt_add_slide(position=None, layout="blank")`** - Insert slides at specific positions
-5. **`ppt_list_presentations()`** - List open presentations with metadata (index, path, saved state, slide count)
-6. **`ppt_save_presentation(presentation_index?)`** - Save existing (already named) presentation
-7. **`ppt_save_presentation_as(target_path, presentation_index?, overwrite=False, close_after=False, reveal=False)`** - Save/Export to new `.pptx`
-8. **`ppt_close_presentation(presentation_index?, save=False)`** - Close one or all presentations
-9. **`ppt_reveal(presentation_index?)`** - Make PowerPoint visible and optionally activate a presentation
-
-#### **Precise Shape Placement**
-10. **`ppt.shape.textbox.add(slide_index, left, top, width, height, text, font?, paragraph?, dpi=96)`** - Coordinate-based text placement
-11. **`ppt.shape.textbox.update(slide_index, shape_id, text?, font?, paragraph?)`** - Update existing text
-12. **`ppt.shape.image.add(slide_index, path, left, top, width?, height?, preserve_aspect=True, dpi=96)`** - Enhanced image placement
-
-#### **Shape Management**
-13. **`ppt_list_shapes(slide_index)`** - Get all shapes with precise geometry
-14. **`ppt_delete_shape(slide_index, shape_id)`** - Remove shapes for OCR corrections
-15. **`ppt.shape.zorder(slide_index, shape_id, action)`** - Layer control with 4 actions
+#### **Hierarchical Tool Inventory**
+1. `ppt.presentation.content()` – Full structured content dump
+2. `ppt.presentation.create(a4_portrait=True, close_existing=False)` – Create (auto slide 1)
+3. `ppt.presentation.list()` – List open presentations
+4. `ppt.presentation.activate(presentation_index)` – Focus a presentation window
+5. `ppt.presentation.save(presentation_index?)`
+6. `ppt.presentation.save_as(target_path, presentation_index?, overwrite=False, close_after=False, reveal=False)`
+7. `ppt.presentation.close(presentation_index?, save=False)`
+8. `ppt.presentation.reveal(presentation_index?)`
+9. `ppt.slide.add(position=None, layout="blank")`
+10. `ppt.slide.delete(slide_index)`
+11. `ppt.slide.list()`
+12. `ppt.shape.textbox.add(slide_index, left, top, width, height, text, font?, paragraph?, dpi=96)`
+13. `ppt.shape.textbox.update(slide_index, shape_id, text?, font?, paragraph?)`
+14. `ppt.shape.image.add(slide_index, path, left, top, width?, height?, preserve_aspect=True, dpi=96)`
+15. `ppt.shape.list(slide_index)`
+16. `ppt.shape.delete(slide_index, shape_id)`
+17. `ppt.shape.zorder(slide_index, shape_id, action)` (bring_to_front, send_to_back, step_forward, step_backward)
+18. `ppt.capabilities()` – Static metadata (layouts, units, error codes)
 
 ### 🆕 Save / Export Workflow
 - Use `ppt_save_presentation_as("C:/path/to/file.pptx")` immediately after construction to persist a new in-memory presentation.
@@ -36,16 +35,16 @@
 - Batch closing: `ppt_close_presentation(save=True)` will save and close all, or specify `presentation_index` to target one.
 - Visibility: `ppt_reveal()` ensures the window is shown for manual inspection.
 
-Example agent flow (simplified—initial blank slide already exists):
-1. `ppt_create_presentation(a4_portrait=False)`  ← slide 1 is ready immediately
+Example agent flow:
+1. `ppt.presentation.create(a4_portrait=False)` ← slide 1 ready
 2. `ppt.shape.textbox.add(slide_index=1, left=720, top=20, width=220, height=40, text="Hello World")`
-3. `ppt_save_presentation_as("~/Documents/hello-world.pptx")`
-4. Later edits → `ppt_save_presentation()`
+3. `ppt.presentation.save_as("~/Documents/hello-world.pptx")`
+4. Edits → `ppt.presentation.save()`
 
 Error conditions:
-- Saving unnamed presentation via `ppt_save_presentation` returns code `unsaved` → must use `ppt_save_presentation_as` first.
-- Overwrite protection enforced unless `overwrite=True`.
-- Ambiguous multi-presentation state returns code `ambiguous` if index omitted.
+- Unnamed presentation via `ppt.presentation.save` → `unsaved` (must use `ppt.presentation.save_as`).
+- Existing file without `overwrite=True` → `overwrite-denied`.
+- Multiple presentations + omitted index (operations needing a specific one) → `ambiguous`.
 
 ### 🛡️ Comprehensive Validation & Error Handling
 - ✅ **Centralized PPTValidationError class** with structured error codes
@@ -111,15 +110,12 @@ Error conditions:
 
 **Perfect for AI agents performing OCR document reconstruction:**
 
-1. **Create A4 presentation**: `ppt_create_presentation(a4_portrait=True)` (slide 1 auto-created)
-2. **Place text blocks**: `ppt.shape.textbox.add(slide_index=1, ...)` with OCR coordinates
-3. **Add additional slides if needed**: `ppt_add_slide()`
-4. **Place more content**: `ppt.shape.textbox.add(...)` / `ppt.shape.image.add(...)`
-5. **Fine-tune**: `ppt.shape.textbox.update()`, `ppt.shape.zorder()` for corrections
-6. **Quality control**: `ppt_list_shapes()` for validation
-4. **Add images**: `ppt.shape.image.add(...)` with aspect ratio preservation
-5. **Fine-tune**: `ppt.shape.textbox.update()`, `ppt.shape.zorder()` for corrections
-6. **Quality control**: `ppt_list_shapes()` for validation
+1. Create: `ppt.presentation.create(a4_portrait=True)`
+2. Text: `ppt.shape.textbox.add(slide_index=1, ...)`
+3. Slides (optional): `ppt.slide.add()`
+4. Images: `ppt.shape.image.add(...)`
+5. Adjust: `ppt.shape.textbox.update()` / `ppt.shape.zorder()`
+6. Inspect: `ppt.shape.list(slide_index=1)`
 
 **Key Benefits:**
 - 📐 **Sub-point precision**: Accurate to 0.001 points
@@ -138,7 +134,7 @@ Error conditions:
 - **Thread safety**: Uses existing Word MCP server concurrency patterns
 - Added save/list/close/reveal tools mirroring Word capability patterns.
 - `ppt_save_presentation_as` prefers `SaveCopyAs` then falls back to `SaveAs`.
-- Consistent `{ok, ...}` response envelope with structured error codes: `unsaved`, `exists`, `ambiguous`, `save-failed`, `close-failed`.
+- Consistent `{ok, ...}` envelope with structured error codes: `unsaved`, `ambiguous`, `not-found`, `overwrite-denied`, `operation-failed`, `io-error`, `invalid-unit`, `invalid-dimensions`, `invalid-action`, `creation-failed`, `validation-failed`, `out-of-range`, `close-failed`.
 
 ## 🚀 Ready for Production
 

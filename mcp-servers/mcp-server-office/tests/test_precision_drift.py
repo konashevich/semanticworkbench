@@ -356,7 +356,7 @@ async def reconstruct_document():
     # TODO: Execute commands via MCP server
     print("\\nTo execute:")
     print("1. Start PowerPoint MCP server")
-    print("2. Call ppt_create_presentation(a4_portrait=True)")
+    print("2. Call ppt.presentation.create(a4_portrait=True)")
     print("3. Call ppt_add_slide()")
     print("4. Execute each command above")
 

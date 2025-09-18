@@ -12,13 +12,16 @@ This MCP server provides comprehensive Office application manipulation with:
 Complete PowerPoint automation with precision coordinate placement for OCR reconstruction workflows:
 
 #### **🎯 Presentation Management**
-- **`ppt_create_presentation(a4_portrait=True, close_existing=False)`**: Create new presentation with A4 sizing
-- **`ppt_set_slide_size(width, height)`**: Custom slide dimensions with unit support
-- **`ppt_add_slide(position=None, layout="blank")`**: Insert slides at specific positions
-- **`ppt_get_content()`**: Extract all slide content for analysis
+- **`ppt.presentation.create(a4_portrait=True, close_existing=False)`**: Create new presentation (auto slide 1)
+- **`ppt.presentation.content()`**: Extract full structured content
+- **`ppt.presentation.list()`**: List open presentations
+- **`ppt.presentation.activate(presentation_index)`**: Focus a specific presentation
+- **`ppt.presentation.save(presentation_index?)`** / **`ppt.presentation.save_as(...)`**: Persist changes
+- **`ppt.presentation.close(presentation_index?, save=False)`**: Close one or all
+- **`ppt.presentation.reveal(presentation_index?)`**: Bring window front
 
 #### **📝 Precise Text Box Placement**  
-- **`ppt.shape.textbox.add(slide_index, left, top, width, height, text, font?, paragraph?)`**: Add text at exact coordinates
+- **`ppt.shape.textbox.add(slide_index, left, top, width, height, text, font?, paragraph?, dpi=96)`**: Add text at exact coordinates
 - **`ppt.shape.textbox.update(slide_index, shape_id, text?, font?, paragraph?)`**: Update existing text boxes
 - **Full Word Formatting Parity**: name, size, color, bold, italic, underline, strikethrough, superscript, subscript
 - **Advanced Paragraph Controls**: alignment, line_spacing, space_before, space_after, bullets, indentation
@@ -30,8 +33,8 @@ Complete PowerPoint automation with precision coordinate placement for OCR recon
 - **Format Support**: PNG, JPG/JPEG, GIF, BMP, WMF, EMF, TIFF
 
 #### **🎛️ Shape Management**
-- **`ppt_list_shapes(slide_index)`**: Get all shapes with precise geometry
-- **`ppt_delete_shape(slide_index, shape_id)`**: Remove shapes for corrections
+- **`ppt.shape.list(slide_index)`**: Get all shapes with precise geometry
+- **`ppt.shape.delete(slide_index, shape_id)`**: Remove shapes
 - **`ppt.shape.zorder(slide_index, shape_id, action)`**: Layer control (bring_to_front, send_to_back, step_forward, step_backward)
 
 #### **🎯 Coordinate System & Units**
@@ -62,7 +65,7 @@ PowerPoint Coordinate System (A4 Portrait):
 - **A4 Portrait**: 210mm × 297mm (595.276 × 841.890 points)
 - **Precision**: 3 decimal places, drift-tested for 80+ shape workflows
 
-#### **�️ Validation & Error Handling**
+#### **🛡️ Validation & Error Handling**
 ```json
 {
   "ok": true,
@@ -73,31 +76,33 @@ PowerPoint Coordinate System (A4 Portrait):
   "height_pt": 50.000
 }
 ```
-**Error Codes**: `not-found`, `out-of-bounds`, `invalid-size`, `invalid-color`, `invalid-unit`, `io-error`, `unsupported-format`
+**Error Codes** (authoritative subset): `not-found`, `ambiguous`, `unsaved`, `overwrite-denied`, `operation-failed`, `io-error`, `invalid-unit`, `invalid-dimensions`, `invalid-action`, `creation-failed`, `validation-failed`, `out-of-range`, `unsupported-format`, `close-failed`
 
 #### **📋 OCR Reconstruction Example**
 ```python
-# 1. Create A4 presentation
-await ppt_create_presentation(a4_portrait=True)
-await ppt_add_slide()
+# 1. Create A4 presentation (slide 1 exists automatically)
+await ppt.presentation.create(a4_portrait=True)
 
 # 2. Add text blocks from OCR coordinates
 await ppt.shape.textbox.add(
-    slide_index=1,
-    left="25mm", top="30mm", 
-    width="160mm", height="12mm",
-    text="Document Title",
-    font={"name": "Arial", "size": 16, "bold": True, "color": "#000000"}
+  slide_index=1,
+  left="25mm", top="30mm",
+  width="160mm", height="12mm",
+  text="Document Title",
+  font={"name": "Arial", "size": 16, "bold": True, "color": "#000000"}
 )
 
-# 3. Add images at exact positions  
+# 3. Add image
 await ppt.shape.image.add(
-    slide_index=1,
-    path="/path/to/logo.png",
-    left="170mm", top="10mm",
-    width="30mm", height="15mm",
-    dpi=300  # OCR DPI
+  slide_index=1,
+  path="/path/to/logo.png",
+  left="170mm", top="10mm",
+  width="30mm", height="15mm",
+  dpi=300
 )
+
+# 4. Save
+await ppt.presentation.save_as("~/Documents/output.pptx")
 ```
 
 ### 🔧 **Enhanced Word Tools**
