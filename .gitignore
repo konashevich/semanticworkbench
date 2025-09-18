@@ -59,3 +59,4 @@ mcp-servers/mcp-server-office/.venv312/Lib/site-packages/pip/py.typed
 # keep server folders but ignore virtualenvs inside them
 mcp-servers/mcp-server-office/.venv*/
 mcp-servers/mcp-server-office-prod/.venv*/
+mcp-servers/mcp-server-office-prod/
