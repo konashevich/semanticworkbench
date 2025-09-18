@@ -278,7 +278,7 @@ async def test_ocr_workflow_simulation():
             font_formatting.update({"size": 10})
         
         ppt_commands.append({
-            "tool": "ppt_add_text_box",
+            "tool": "ppt.shape.textbox.add",
             "params": {
                 "slide_index": 1,
                 "left": f"{left_pt:.3f}pt",

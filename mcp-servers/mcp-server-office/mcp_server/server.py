@@ -2350,12 +2350,8 @@ def create_mcp_server() -> FastMCP:
                 return sh
         return None
 
-    @mcp.tool()
-    async def ppt_get_content() -> dict:
-        """Returns the content of all slides in the active PowerPoint presentation.
-
-        Returns: {ok, content?, error?}
-        """
+    async def _ppt_get_content() -> dict:
+        """Internal: full presentation content."""
         try:
             _, pres = _ppt_active()
             content = get_presentation_content(pres)
@@ -2365,14 +2361,13 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_create_presentation(a4_portrait: bool = True, close_existing: bool = False) -> dict:
+    async def _ppt_create_presentation(a4_portrait: bool = True, close_existing: bool = False) -> dict:
         """Create a new PowerPoint presentation with optional A4 portrait sizing.
 
         Args:
             a4_portrait: Set slide size to A4 portrait (210mm x 297mm)  
             close_existing: Close all existing presentations first
-        Returns: {ok, presentation_index?, width_pt?, height_pt?, error?}
+        Returns: {ok, presentation_index?, width_pt?, height_pt?, first_slide_index?=1, slide_count?, error?}
         """
         try:
             ppt = get_powerpoint_app()
@@ -2384,43 +2379,25 @@ def create_mcp_server() -> FastMCP:
                 w = mm_to_points(210.0)
                 h = mm_to_points(297.0)
                 pp_set_slide_size(pres, w, h)
+            # Guarantee there is an initial blank slide (slide 1) so downstream tools
+            # relying on 1-based indexing can immediately operate without an explicit add.
+            if pres.Slides.Count == 0:
+                # Use existing helper to add a blank slide at end (which becomes index 1)
+                create_blank_slide(pres, position=None, layout="blank")
             return {
                 "ok": True,
                 "presentation_index": ppt.Presentations.Count,
                 "width_pt": round_precision(float(pres.PageSetup.SlideWidth)),
                 "height_pt": round_precision(float(pres.PageSetup.SlideHeight)),
+                "first_slide_index": 1,
+                "slide_count": pres.Slides.Count,
             }
         except Exception as e:
             return {"ok": False, "error": {"code": "creation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_set_slide_size(width: str | float, height: str | float) -> dict:
-        """Set current presentation slide size with unit support.
+    # (Removed exported slide size setter per overhaul plan; resize can be reintroduced as ppt.presentation.set_size later.)
 
-        Args:
-            width: Width in points or with unit suffix (e.g., '210mm', '8.5in', '612pt')
-            height: Height in points or with unit suffix
-        Returns: {ok, width_pt?, height_pt?, error?}
-        """
-        try:
-            _, pres = _ppt_active()
-            w_pt = parse_unit(width)
-            h_pt = parse_unit(height)
-            if w_pt <= 0 or h_pt <= 0:
-                raise PPTValidationError("invalid-size", f"Slide dimensions must be positive: {w_pt}x{h_pt}")
-            pp_set_slide_size(pres, w_pt, h_pt)
-            return {
-                "ok": True,
-                "width_pt": round_precision(float(pres.PageSetup.SlideWidth)),
-                "height_pt": round_precision(float(pres.PageSetup.SlideHeight))
-            }
-        except PPTValidationError as e:
-            return _ppt_error_response(e)
-        except Exception as e:
-            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
-
-    @mcp.tool()
-    async def ppt_add_slide(position: int | None = None, layout: str = "blank") -> dict:
+    async def _ppt_add_slide(position: int | None = None, layout: str = "blank") -> dict:
         """Add a new slide at specified position.
 
         Args:
@@ -2435,8 +2412,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_add_text_box(
+    async def _ppt_add_text_box(
         slide_index: int, 
         left: str | float, 
         top: str | float, 
@@ -2486,8 +2462,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_update_text_box(
+    async def _ppt_update_text_box(
         slide_index: int,
         shape_id: int,
         text: str | None = None,
@@ -2534,8 +2509,150 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_add_image(
+    # Additional hierarchical wrappers
+    @mcp.tool(name="ppt.shape.image.add")
+    async def _ppt_shape_image_add(
+        slide_index: int,
+        path: str,
+        left: str | float,
+        top: str | float,
+        width: str | float | None = None,
+        height: str | float | None = None,
+        preserve_aspect: bool = True,
+        dpi: float = 96.0,
+    ) -> dict:
+        return await _ppt_add_image(slide_index, path, left, top, width, height, preserve_aspect, dpi)
+
+    @mcp.tool(name="ppt.shape.list")
+    async def _ppt_shape_list(slide_index: int) -> dict:
+        return await _ppt_list_shapes(slide_index)
+
+    @mcp.tool(name="ppt.shape.delete")
+    async def _ppt_shape_delete(slide_index: int, shape_id: int) -> dict:
+        return await _ppt_delete_shape(slide_index, shape_id)
+
+    @mcp.tool(name="ppt.shape.zorder")
+    async def _ppt_shape_zorder(slide_index: int, shape_id: int, action: str) -> dict:
+        return await _ppt_set_z_order(slide_index, shape_id, action)
+
+    @mcp.tool(name="ppt.presentation.list")
+    async def _ppt_presentation_list() -> dict:
+        return await _ppt_list_presentations()
+
+    @mcp.tool(name="ppt.presentation.save")
+    async def _ppt_presentation_save(presentation_index: int | None = None) -> dict:
+        return await _ppt_save_presentation(presentation_index)
+
+    @mcp.tool(name="ppt.presentation.activate")
+    async def _ppt_presentation_activate(presentation_index: int) -> dict:
+        """Activate (focus) a specific open presentation window by index.
+
+        Returns: {ok, presentation_index?, error?}
+        """
+        try:
+            ppt = get_powerpoint_app()
+            if presentation_index < 1 or presentation_index > ppt.Presentations.Count:
+                raise PPTValidationError("not-found", f"Presentation index {presentation_index} out of range")
+            pres = ppt.Presentations(presentation_index)
+            try:
+                pres.Windows(1).Activate()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            return {"ok": True, "presentation_index": presentation_index}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool(name="ppt.presentation.save_as")
+    async def _ppt_presentation_save_as(
+        target_path: str,
+        presentation_index: int | None = None,
+        overwrite: bool = False,
+        close_after: bool = False,
+        reveal: bool = False,
+    ) -> dict:
+        return await _ppt_save_presentation_as(target_path, presentation_index, overwrite, close_after, reveal)
+
+    @mcp.tool(name="ppt.presentation.close")
+    async def _ppt_presentation_close(presentation_index: int | None = None, save: bool = False) -> dict:
+        return await _ppt_close_presentation(presentation_index, save)
+
+    @mcp.tool(name="ppt.presentation.reveal")
+    async def _ppt_presentation_reveal(presentation_index: int | None = None) -> dict:
+        return await _ppt_reveal(presentation_index)
+
+    # Slide list & delete wrappers map to existing functions
+    @mcp.tool(name="ppt.slide.list")
+    async def _ppt_slide_list() -> dict:
+        # Derive from content for now: list slides with shape count
+        try:
+            _, pres = _ppt_active()
+            slides = []
+            for i in range(1, pres.Slides.Count + 1):
+                s = pres.Slides(i)
+                slides.append({
+                    "slide_index": i,
+                    "layout": getattr(s, 'Layout', None),
+                    "shape_count": int(s.Shapes.Count)
+                })
+            return {"ok": True, "slides": slides}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool(name="ppt.slide.delete")
+    async def _ppt_slide_delete(slide_index: int) -> dict:
+        try:
+            _, pres = _ppt_active()
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            pres.Slides(slide_index).Delete()
+            return {"ok": True}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool(name="ppt.capabilities")
+    async def _ppt_capabilities() -> dict:
+        try:
+            ppt = get_powerpoint_app()
+            layouts = ["blank", "title"]
+            # Determine max slide dims from current or default template
+            try:
+                pres = get_active_presentation(ppt)
+                width_pt = round_precision(float(pres.PageSetup.SlideWidth))
+                height_pt = round_precision(float(pres.PageSetup.SlideHeight))
+            except Exception:
+                width_pt = None
+                height_pt = None
+            font_features = {
+                "bold": True,
+                "italic": True,
+                "underline": True,
+                "strikethrough": True,
+                "superscript": True,
+                "subscript": True
+            }
+            error_codes = [
+                "not-found","ambiguous","unsaved","invalid-unit","invalid-dimensions","invalid-action",
+                "out-of-range","creation-failed","operation-failed","overwrite-denied","io-error","validation-failed"
+            ]
+            return {
+                "ok": True,
+                "layouts": layouts,
+                "coordinate_units": ["pt","mm","px"],
+                "font_features": font_features,
+                "max_slide_width_pt": width_pt,
+                "max_slide_height_pt": height_pt,
+                "error_codes": error_codes
+            }
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    async def _ppt_add_image(
         slide_index: int, 
         path: str, 
         left: str | float, 
@@ -2590,8 +2707,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_list_shapes(slide_index: int) -> dict:
+    async def _ppt_list_shapes(slide_index: int) -> dict:
         """List all shapes on a slide with precise geometry.
         
         Returns: {ok, shapes?, error?}
@@ -2616,8 +2732,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_delete_shape(slide_index: int, shape_id: int) -> dict:
+    async def _ppt_delete_shape(slide_index: int, shape_id: int) -> dict:
         """Delete a shape from a slide.
         
         Returns: {ok, error?}
@@ -2653,8 +2768,7 @@ def create_mcp_server() -> FastMCP:
             raise PPTValidationError("not-found", f"Presentation index {presentation_index} out of range")
         return ppt.Presentations(presentation_index)
 
-    @mcp.tool()
-    async def ppt_list_presentations() -> dict:
+    async def _ppt_list_presentations() -> dict:
         """List open PowerPoint presentations with basic metadata.
 
         Returns: {ok, presentations: [{index, path, saved, slides, width_pt, height_pt}], error?}
@@ -2681,8 +2795,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_save_presentation(presentation_index: int | None = None) -> dict:
+    async def _ppt_save_presentation(presentation_index: int | None = None) -> dict:
         """Save the specified PowerPoint presentation or the single open one.
 
         Returns: {ok, path?, notes?, error?}
@@ -2693,19 +2806,18 @@ def create_mcp_server() -> FastMCP:
             # If never saved (no FullName), raise helpful error
             path = getattr(pres, "FullName", "") or ""
             if not path:
-                return {"ok": False, "error": {"code": "unsaved", "message": "Presentation has no path. Use ppt_save_presentation_as."}}
+                return {"ok": False, "error": {"code": "unsaved", "message": "Presentation has no path. Use ppt.presentation.save_as(...) first."}}
             try:
                 pres.Save()
             except Exception as ex:
-                return {"ok": False, "error": {"code": "save-failed", "message": str(ex)}}
+                return {"ok": False, "error": {"code": "operation-failed", "message": str(ex)}}
             return {"ok": True, "path": path, "notes": "saved"}
         except PPTValidationError as e:
             return _ppt_error_response(e)
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_save_presentation_as(target_path: str, presentation_index: int | None = None, overwrite: bool = False, close_after: bool = False, reveal: bool = False) -> dict:
+    async def _ppt_save_presentation_as(target_path: str, presentation_index: int | None = None, overwrite: bool = False, close_after: bool = False, reveal: bool = False) -> dict:
         """Save (export) the specified or single presentation to a .pptx file.
 
         Args:
@@ -2724,7 +2836,7 @@ def create_mcp_server() -> FastMCP:
             if p.suffix.lower() != ".pptx":
                 p = p.with_suffix(".pptx")
             if p.exists() and not overwrite:
-                return {"ok": False, "error": {"code": "exists", "message": f"Target already exists: {p}"}}
+                return {"ok": False, "error": {"code": "overwrite-denied", "message": f"Target already exists: {p}"}}
             try:
                 p.parent.mkdir(parents=True, exist_ok=True)
             except Exception as ex:
@@ -2743,7 +2855,7 @@ def create_mcp_server() -> FastMCP:
                 except Exception:
                     pres.SaveAs(str(p))
             except Exception as ex:
-                return {"ok": False, "error": {"code": "save-failed", "message": str(ex)}}
+                return {"ok": False, "error": {"code": "operation-failed", "message": str(ex)}}
             if reveal:
                 try:
                     ppt.Visible = True
@@ -2765,8 +2877,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_close_presentation(presentation_index: int | None = None, save: bool = False) -> dict:
+    async def _ppt_close_presentation(presentation_index: int | None = None, save: bool = False) -> dict:
         """Close a specific PowerPoint presentation, or all if none specified.
 
         Returns: {ok, closed?, error?}
@@ -2805,8 +2916,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_reveal(presentation_index: int | None = None) -> dict:
+    async def _ppt_reveal(presentation_index: int | None = None) -> dict:
         """Make the PowerPoint window visible and optionally activate the specified presentation.
 
         Returns: {ok, activated_index?, error?}
@@ -2831,8 +2941,68 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool()
-    async def ppt_set_z_order(slide_index: int, shape_id: int, action: str) -> dict:
+    async def _ppt_set_z_order(slide_index: int, shape_id: int, action: str) -> dict:
+        """Internal z-order change implementation."""
+        try:
+            _, pres = _ppt_active()
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            slide = pres.Slides(slide_index)
+            target = _ppt_find_shape(slide, shape_id)
+            if target is None:
+                raise PPTValidationError("not-found", f"Shape {shape_id} not found")
+            action_map = {
+                "bring_to_front": 0,
+                "send_to_back": 1,
+                "step_forward": 2,
+                "step_backward": 3,
+            }
+            act = action_map.get(action.lower())
+            if act is None:
+                raise PPTValidationError("invalid-action", f"Unsupported z-order action: {action}")
+            target.ZOrder(act)
+            return {"ok": True, "shape_id": target.Id, "z_order": getattr(target, "ZOrderPosition", None)}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+    
+    # ---------------- New Hierarchical Tool Exports (Overhaul) -----------------
+    @mcp.tool(name="ppt.presentation.content")
+    async def _tool_ppt_presentation_content() -> dict:
+        return await _ppt_get_content()
+
+    @mcp.tool(name="ppt.presentation.create")
+    async def _tool_ppt_presentation_create(a4_portrait: bool = True, close_existing: bool = False) -> dict:
+        return await _ppt_create_presentation(a4_portrait=a4_portrait, close_existing=close_existing)
+
+    @mcp.tool(name="ppt.slide.add")
+    async def _tool_ppt_slide_add(position: int | None = None, layout: str = "blank") -> dict:
+        return await _ppt_add_slide(position=position, layout=layout)
+
+    @mcp.tool(name="ppt.shape.textbox.add")
+    async def _tool_ppt_shape_textbox_add(
+        slide_index: int,
+        left: str | float,
+        top: str | float,
+        width: str | float,
+        height: str | float,
+        text: str,
+        font: dict | None = None,
+        paragraph: dict | None = None,
+        dpi: float = 96.0,
+    ) -> dict:
+        return await _ppt_add_text_box(slide_index, left, top, width, height, text, font, paragraph, dpi)
+
+    @mcp.tool(name="ppt.shape.textbox.update")
+    async def _tool_ppt_shape_textbox_update(
+        slide_index: int,
+        shape_id: int,
+        text: str | None = None,
+        font: dict | None = None,
+        paragraph: dict | None = None,
+    ) -> dict:
+        return await _ppt_update_text_box(slide_index, shape_id, text, font, paragraph)
         """Change z-order of shape with comprehensive actions.
         
         Actions: bring_to_front, send_to_back, step_forward, step_backward

@@ -18,13 +18,13 @@ Complete PowerPoint automation with precision coordinate placement for OCR recon
 - **`ppt_get_content()`**: Extract all slide content for analysis
 
 #### **📝 Precise Text Box Placement**  
-- **`ppt_add_text_box(slide_index, left, top, width, height, text, font?, paragraph?)`**: Add text at exact coordinates
-- **`ppt_update_text_box(slide_index, shape_id, text?, font?, paragraph?)`**: Update existing text boxes
+- **`ppt.shape.textbox.add(slide_index, left, top, width, height, text, font?, paragraph?)`**: Add text at exact coordinates
+- **`ppt.shape.textbox.update(slide_index, shape_id, text?, font?, paragraph?)`**: Update existing text boxes
 - **Full Word Formatting Parity**: name, size, color, bold, italic, underline, strikethrough, superscript, subscript
 - **Advanced Paragraph Controls**: alignment, line_spacing, space_before, space_after, bullets, indentation
 
 #### **🖼️ Enhanced Image Handling**
-- **`ppt_add_image(slide_index, path, left, top, width?, height?, preserve_aspect=True, dpi=96)`**: Precise image placement
+- **`ppt.shape.image.add(slide_index, path, left, top, width?, height?, preserve_aspect=True, dpi=96)`**: Precise image placement
 - **Bounds validation**: Direct width+height validated pre-insert; aspect-derived validated post intrinsic read
 - **DPI Support**: Convert pixel coordinates from OCR (300 DPI typical)
 - **Format Support**: PNG, JPG/JPEG, GIF, BMP, WMF, EMF, TIFF
@@ -32,7 +32,7 @@ Complete PowerPoint automation with precision coordinate placement for OCR recon
 #### **🎛️ Shape Management**
 - **`ppt_list_shapes(slide_index)`**: Get all shapes with precise geometry
 - **`ppt_delete_shape(slide_index, shape_id)`**: Remove shapes for corrections
-- **`ppt_set_z_order(slide_index, shape_id, action)`**: Layer control (bring_to_front, send_to_back, step_forward, step_backward)
+- **`ppt.shape.zorder(slide_index, shape_id, action)`**: Layer control (bring_to_front, send_to_back, step_forward, step_backward)
 
 #### **🎯 Coordinate System & Units**
 - **Origin**: Top-left of slide (0,0)
@@ -82,7 +82,7 @@ await ppt_create_presentation(a4_portrait=True)
 await ppt_add_slide()
 
 # 2. Add text blocks from OCR coordinates
-await ppt_add_text_box(
+await ppt.shape.textbox.add(
     slide_index=1,
     left="25mm", top="30mm", 
     width="160mm", height="12mm",
@@ -91,7 +91,7 @@ await ppt_add_text_box(
 )
 
 # 3. Add images at exact positions  
-await ppt_add_image(
+await ppt.shape.image.add(
     slide_index=1,
     path="/path/to/logo.png",
     left="170mm", top="10mm",
