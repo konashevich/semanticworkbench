@@ -2510,7 +2510,7 @@ def create_mcp_server() -> FastMCP:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
     # Additional hierarchical wrappers
-    @mcp.tool(name="ppt.shape.image.add")
+    @mcp.tool(name="ppt_shape_image_add", description="Add image to a slide with optional sizing and aspect control.")
     async def _ppt_shape_image_add(
         slide_index: int,
         path: str,
@@ -2523,27 +2523,27 @@ def create_mcp_server() -> FastMCP:
     ) -> dict:
         return await _ppt_add_image(slide_index, path, left, top, width, height, preserve_aspect, dpi)
 
-    @mcp.tool(name="ppt.shape.list")
+    @mcp.tool(name="ppt_shape_list", description="List shapes on a slide including geometry and type.")
     async def _ppt_shape_list(slide_index: int) -> dict:
         return await _ppt_list_shapes(slide_index)
 
-    @mcp.tool(name="ppt.shape.delete")
+    @mcp.tool(name="ppt_shape_delete", description="Delete a shape on a slide by shape_id.")
     async def _ppt_shape_delete(slide_index: int, shape_id: int) -> dict:
         return await _ppt_delete_shape(slide_index, shape_id)
 
-    @mcp.tool(name="ppt.shape.zorder")
+    @mcp.tool(name="ppt_shape_zorder", description="Adjust z-order of a shape: bring_to_front, send_to_back, step_forward, step_backward.")
     async def _ppt_shape_zorder(slide_index: int, shape_id: int, action: str) -> dict:
         return await _ppt_set_z_order(slide_index, shape_id, action)
 
-    @mcp.tool(name="ppt.presentation.list")
+    @mcp.tool(name="ppt_presentation_list", description="List open presentations with index, path, saved flag, slide count, and dimensions.")
     async def _ppt_presentation_list() -> dict:
         return await _ppt_list_presentations()
 
-    @mcp.tool(name="ppt.presentation.save")
+    @mcp.tool(name="ppt_presentation_save", description="Save a presentation (requires prior save_as if unsaved).")
     async def _ppt_presentation_save(presentation_index: int | None = None) -> dict:
         return await _ppt_save_presentation(presentation_index)
 
-    @mcp.tool(name="ppt.presentation.activate")
+    @mcp.tool(name="ppt_presentation_activate", description="Activate (focus) a presentation window by index.")
     async def _ppt_presentation_activate(presentation_index: int) -> dict:
         """Activate (focus) a specific open presentation window by index.
 
@@ -2564,7 +2564,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool(name="ppt.presentation.save_as")
+    @mcp.tool(name="ppt_presentation_save_as", description="Save (export) a presentation to path with overwrite/close/reveal options.")
     async def _ppt_presentation_save_as(
         target_path: str,
         presentation_index: int | None = None,
@@ -2574,16 +2574,16 @@ def create_mcp_server() -> FastMCP:
     ) -> dict:
         return await _ppt_save_presentation_as(target_path, presentation_index, overwrite, close_after, reveal)
 
-    @mcp.tool(name="ppt.presentation.close")
+    @mcp.tool(name="ppt_presentation_close", description="Close a presentation (or all when index omitted) optionally saving.")
     async def _ppt_presentation_close(presentation_index: int | None = None, save: bool = False) -> dict:
         return await _ppt_close_presentation(presentation_index, save)
 
-    @mcp.tool(name="ppt.presentation.reveal")
+    @mcp.tool(name="ppt_presentation_reveal", description="Reveal PowerPoint window and optionally activate a presentation.")
     async def _ppt_presentation_reveal(presentation_index: int | None = None) -> dict:
         return await _ppt_reveal(presentation_index)
 
     # Slide list & delete wrappers map to existing functions
-    @mcp.tool(name="ppt.slide.list")
+    @mcp.tool(name="ppt_slide_list", description="List slides with layout and shape count.")
     async def _ppt_slide_list() -> dict:
         # Derive from content for now: list slides with shape count
         try:
@@ -2602,7 +2602,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool(name="ppt.slide.delete")
+    @mcp.tool(name="ppt_slide_delete", description="Delete a slide by 1-based index.")
     async def _ppt_slide_delete(slide_index: int) -> dict:
         try:
             _, pres = _ppt_active()
@@ -2615,7 +2615,7 @@ def create_mcp_server() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
 
-    @mcp.tool(name="ppt.capabilities")
+    @mcp.tool(name="ppt_capabilities", description="Report PowerPoint capabilities: layouts, units, font features, color formats, error codes.")
     async def _ppt_capabilities() -> dict:
         try:
             ppt = get_powerpoint_app()
@@ -2642,6 +2642,12 @@ def create_mcp_server() -> FastMCP:
                 "out-of-range","creation-failed","operation-failed","overwrite-denied","io-error",
                 "validation-failed","close-failed","sandbox"
             ]
+            # Color capability metadata (for background and font color usage)
+            named_colors = [
+                "black","white","red","green","blue","yellow","gray","grey","orange","purple","teal"
+            ]
+            color_aliases = {"grey": "gray"}
+            color_formats = ["#RRGGBB", "named", "integer-bgr"]
             return {
                 "ok": True,
                 "layouts": layouts,
@@ -2649,7 +2655,16 @@ def create_mcp_server() -> FastMCP:
                 "font_features": font_features,
                 "max_slide_width_pt": width_pt,
                 "max_slide_height_pt": height_pt,
-                "error_codes": error_codes
+                "error_codes": error_codes,
+                "color_input_formats": color_formats,
+                "named_colors": named_colors,
+                "color_aliases": color_aliases,
+                "color_integer_format": "OLE BGR (blue<<16 | green<<8 | red)",
+                "color_examples": {
+                    "hex": "#FF0000",
+                    "named": "red",
+                    "integer_bgr_for_red": 0x0000FF
+                }
             }
         except Exception as e:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
@@ -2970,19 +2985,106 @@ def create_mcp_server() -> FastMCP:
             return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
     
     # ---------------- New Hierarchical Tool Exports (Overhaul) -----------------
-    @mcp.tool(name="ppt.presentation.content")
+    @mcp.tool(name="ppt_presentation_content", description="Return full structured presentation content (may be large).")
     async def _tool_ppt_presentation_content() -> dict:
         return await _ppt_get_content()
 
-    @mcp.tool(name="ppt.presentation.create")
+    @mcp.tool(name="ppt_presentation_create", description="Create a new presentation; optionally A4 portrait and close existing ones.")
     async def _tool_ppt_presentation_create(a4_portrait: bool = True, close_existing: bool = False) -> dict:
         return await _ppt_create_presentation(a4_portrait=a4_portrait, close_existing=close_existing)
 
-    @mcp.tool(name="ppt.slide.add")
+    @mcp.tool(name="ppt_slide_add", description="Add a slide at optional position with chosen layout.")
     async def _tool_ppt_slide_add(position: int | None = None, layout: str = "blank") -> dict:
         return await _ppt_add_slide(position=position, layout=layout)
 
-    @mcp.tool(name="ppt.shape.textbox.add")
+    @mcp.tool(name="ppt_slide_set_background", description="Set or reset a slide background color (hex/named/int) or follow master.")
+    async def _tool_ppt_slide_set_background(
+        slide_index: int,
+        color: str | int | None = None,
+        follow_master: bool = False,
+    ) -> dict:
+        """Set or reset a slide background fill color.
+
+        Args:
+            slide_index: 1-based slide index.
+            color: Hex ("#RRGGBB"), named (limited), or integer BGR (OLE) value. Omit or None with follow_master=True to revert.
+            follow_master: If True, reverts to master background (ignores color if provided).
+
+        Returns: {ok, slide_index, applied?, reverted?, error?}
+        """
+        try:
+            _, pres = _ppt_active()
+            if slide_index < 1 or slide_index > pres.Slides.Count:
+                raise PPTValidationError("not-found", f"Slide {slide_index} not found")
+            slide = pres.Slides(slide_index)
+
+            if follow_master:
+                # Revert to master background
+                try:
+                    slide.FollowMasterBackground = True  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                return {"ok": True, "slide_index": slide_index, "reverted": True}
+
+            # Ensure we detach from master to apply custom fill
+            try:
+                slide.FollowMasterBackground = False  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+            if color is None:
+                # No color provided -> treat as error unless explicitly reverting
+                raise PPTValidationError("validation-failed", "Color must be provided unless follow_master=True", {"field": "color"})
+
+            ole_color: int
+            if isinstance(color, int):
+                ole_color = color
+            else:
+                c = color.strip().lower()
+                named = {
+                    "black": (0,0,0),
+                    "white": (255,255,255),
+                    "red": (255,0,0),
+                    "green": (0,128,0),
+                    "blue": (0,0,255),
+                    "yellow": (255,255,0),
+                    "gray": (128,128,128),
+                    "grey": (128,128,128),
+                    "orange": (255,165,0),
+                    "purple": (128,0,128),
+                    "teal": (0,128,128),
+                }
+                rgb: tuple[int,int,int]
+                if c in named:
+                    rgb = named[c]
+                elif c.startswith('#') and len(c) == 7:
+                    try:
+                        rgb = (int(c[1:3],16), int(c[3:5],16), int(c[5:7],16))
+                    except Exception:
+                        raise PPTValidationError("validation-failed", f"Invalid hex color: {color}", {"field": "color"})
+                else:
+                    raise PPTValidationError("validation-failed", f"Unsupported color format: {color}", {"field": "color"})
+                # PowerPoint expects BGR in OLE color integer: (Blue << 16) + (Green << 8) + Red
+                r,g,b = rgb
+                ole_color = (b << 16) + (g << 8) + r
+
+            try:
+                fill = slide.Background.Fill  # type: ignore[attr-defined]
+                fill.Visible = True  # type: ignore[attr-defined]
+                fill.Solid()  # type: ignore[attr-defined]
+                fill.ForeColor.RGB = ole_color  # type: ignore[attr-defined]
+            except AttributeError:
+                raise PPTValidationError("operation-failed", "Unable to access slide background fill")
+            except Exception as e:
+                raise PPTValidationError("operation-failed", f"Failed to set background: {e}")
+
+            return {"ok": True, "slide_index": slide_index, "applied": True, "color_rgb": ole_color}
+        except PPTValidationError as e:
+            return _ppt_error_response(e)
+        except Exception as e:
+            return {"ok": False, "error": {"code": "operation-failed", "message": str(e)}}
+
+    @mcp.tool(name="ppt_shape_textbox_add", description="Add a text box with coordinates, size, text, and optional font/paragraph formatting.")
     async def _tool_ppt_shape_textbox_add(
         slide_index: int,
         left: str | float,
@@ -2996,7 +3098,7 @@ def create_mcp_server() -> FastMCP:
     ) -> dict:
         return await _ppt_add_text_box(slide_index, left, top, width, height, text, font, paragraph, dpi)
 
-    @mcp.tool(name="ppt.shape.textbox.update")
+    @mcp.tool(name="ppt_shape_textbox_update", description="Update an existing text box's text and/or formatting.")
     async def _tool_ppt_shape_textbox_update(
         slide_index: int,
         shape_id: int,
